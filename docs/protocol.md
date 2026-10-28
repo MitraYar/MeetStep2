@@ -1,15 +1,29 @@
-# Captured LED evidence
+# SMK RGB protocol
 
-Source: user attachment `red to white.pcapng` (11048 bytes), USBPcap packets.
-64 host-to-device transfers each carry eight USB MIDI event packets, decoded
-into 24-byte SysEx. Device-to-host replies decode to `F0 00 32 01 08 00 00 00 00 7F 01 F7`.
+Source: user attachment `red to white.pcapng`, 64 host-to-device commands.
+USB MIDI CIN framing is stripped; each command is 24 MIDI bytes.
 
-First red message:
-`F0 00 32 09 61 00 00 40 02 1B 02 00 00 40 00 00 00 7F 01 00 78 4F 1B F7`
-First white:
-`F0 00 32 09 61 00 00 40 02 1B 02 00 00 40 00 00 00 7F 7F 7F 7F 6F 1B F7`
+Fixed prefix: `F0 00 32 09 61 00 00 40 02`.
+The next 14 seven-bit bytes encode a little-endian bit stream containing 12 raw bytes:
 
-Address-like bytes 9–10 increment as a 7-bit packed integer by 74 per pad.
-Bytes 18–20 and checksum-like bytes 21–22 differ by color. Two samples are
-insufficient to validate arbitrary RGB encoding and checksum derivation.
-`led_packets.json` holds exact MIDI packets, not USB wrappers.
+| Raw offset | Content |
+| --- | --- |
+| 0–3 | Little-endian address: 283 + 74 × pad index (0–31) |
+| 4–6 | `04 00 00` |
+| 7–9 | 8-bit red, green, blue |
+| 10 | `FF` (preserved opaque fourth color byte) |
+| 11 | `(250 - sum(raw[0:11])) & 255` |
+
+The stream is divided into low-to-high 7-bit chunks, zero-padded to 14 chunks,
+then terminated with `F7`. The checksum invariant is `sum(raw) % 256 == 250`
+for this fixed command prefix. Do not reuse it for other SMK commands.
+
+`lighting.packet` regenerates all 64 original red/white commands byte-for-byte.
+Black and arbitrary colors are generated using the same decoded structure;
+their actual LED appearance still needs hardware verification. The user confirmed
+the original red/white build works. Pad memory is shared across layouts: the app
+repaints all 32 pads when channel 10/11/13 is observed or selected in the GUI.
+A hardware channel switch that sends no MIDI cannot be detected until the next event.
+
+Output is throttled to one changed pad per 20 ms. Device ACK was observed as
+`F0 00 32 01 08 00 00 00 00 7F 01 F7`; ACK gating is not implemented.

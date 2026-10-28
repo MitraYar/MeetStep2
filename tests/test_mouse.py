@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from app import App, DEFAULT
-from core import Model
+from core import Model, Pickup
 import mido
 
 class MouseTests(unittest.TestCase):
@@ -10,13 +10,15 @@ class MouseTests(unittest.TestCase):
         self.app.model=Model()
         self.app.stroke=None
         self.app.config=DEFAULT
+        self.app.pickup=Pickup();self.app.pad_held=set();self.app.pad_mode=10
         self.app.canvas=SimpleNamespace(winfo_width=lambda:880,winfo_height=lambda:350)
     def event(self,x,y):return SimpleNamespace(x=x,y=y)
     def test_fill_and_erase_locked_row_in_both_directions(self):
         a=self.app
         a.click(self.event(81,349))
         a.drag(self.event(879,31),1)
-        self.assertTrue(all(a.model.notes[36]))
+        self.assertTrue(all(a.model.notes[36][:16]))
+        self.assertFalse(any(a.model.notes[36][16:]))
         self.assertTrue(all(not any(row) for row in a.model.notes[:36]+a.model.notes[37:]))
         a.end_stroke(1)
         a.click(self.event(879,349),False)
