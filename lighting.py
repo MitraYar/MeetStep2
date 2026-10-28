@@ -13,12 +13,19 @@ def packet(index,color):
 def default_theme():
     utility=['#245875']*16
     utility[7]='#e0a629';utility[8]='#26bd70';utility[15]='#cc477d'
-    return {'empty_length':1,'empty':['#000000']*7,'low':'#184c40','high':'#67ffcf',
+    return {'empty_length':1,'empty':['#000000']*7,'grid_tint':8,'low':'#184c40','high':'#67ffcf',
             'pattern':'#477fff','encoder_top':'#ec8f24','encoder_bottom':'#8c4bde',
             'bank2':{str(ch):utility.copy() for ch in (10,11,13)}}
+def empty_color(theme,step):
+    return theme['empty'][step%theme['empty_length']]
+
+def grid_color(theme,step,cell):
+    if cell:return blend(theme['low'],theme['high'],cell[0]/127)
+    return blend('#101722',empty_color(theme,step),theme.get('grid_tint',8)/100)
+
 def colors(model,theme,mode):
     if mode==10:
-        first=[blend(theme['low'],theme['high'],cell[0]/127) if cell else theme['empty'][i%theme['empty_length']]
+        first=[blend(theme['low'],theme['high'],cell[0]/127) if cell else empty_color(theme,model.page*16+i)
                for i,cell in enumerate(model.notes[model.selected][model.page*16:model.page*16+16])]
     elif mode==11:first=[blend('#000000',theme['pattern'],(1,.65,.35)[i%3]) for i in range(16)]
     else:first=[theme['encoder_top']]*8+[theme['encoder_bottom']]*8

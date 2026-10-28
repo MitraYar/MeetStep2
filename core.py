@@ -10,6 +10,7 @@ class Model:
     def __init__(self):
         self.patterns = [[[[None]*STEPS for _ in range(128)] for _ in range(9)] for _ in range(8)]
         self.pattern=0; self.playing=0; self.channel=0
+        self.lengths=[64]*8
         self.selected=36; self.base=36; self.page=0
         self.velocity=100; self.length=100; self.bpm=120
         self.undo_stack=[]; self.redo_stack=[]; self.transaction=None
@@ -56,15 +57,16 @@ class Model:
         for n in ([self.selected] if note_only else range(128)):
             for s,value in enumerate(self.notes[n]):self.set_cell(target,self.channel,n,s,value)
         self.commit()
-    def dump(self):return {'version':2,'patterns':self.patterns,'bpm':self.bpm}
+    def dump(self):return {'version':3,'patterns':self.patterns,'bpm':self.bpm,'lengths':self.lengths}
     def load(self,data):
         if isinstance(data,list):
             if len(data)!=128 or any(len(row)!=16 for row in data):raise ValueError('Legacy pattern shape')
             patterns=[[[[None]*64 for _ in range(128)] for _ in range(9)] for _ in range(8)]
-            patterns[0][0]=[row+[None]*48 for row in data];bpm=120
+            patterns[0][0]=[row+[None]*48 for row in data];bpm=120;lengths=[16]+[64]*7
         else:
-            if data.get('version')!=2:raise ValueError('Unsupported project version')
-            patterns=data['patterns'];bpm=data['bpm']
+            if data.get('version') not in (2,3):raise ValueError('Unsupported project version')
+            patterns=data['patterns'];bpm=data['bpm'];lengths=data.get('lengths',[64]*8)
+        if len(lengths)!=8 or any(type(v)!=int or not 1<=v<=64 for v in lengths):raise ValueError('Pattern lengths: 1–64')
         if not isinstance(bpm,(int,float)) or not 30<=bpm<=300:raise ValueError('Invalid BPM')
         if len(patterns)!=8:raise ValueError('Expected 8 patterns')
         for pat in patterns:
@@ -76,33 +78,68 @@ class Model:
                     for cell in row:
                         if cell is not None and (len(cell)!=2 or any(type(x)!=int for x in cell) or not 1<=cell[0]<=127 or not 15<=cell[1]<=300):raise ValueError('Invalid step')
         self.patterns=[[[[tuple(v) if v is not None else None for v in row] for row in ch] for ch in p] for p in patterns]
-        self.bpm=bpm;self.undo_stack.clear();self.redo_stack.clear();self.transaction=None
+        self.bpm=bpm;self.lengths=list(lengths);self.undo_stack.clear();self.redo_stack.clear();self.transaction=None
 
 class Pickup:
-    """Absolute CC pickup: acquire near/crossing target, then limit each change."""
-    def __init__(self):self.states={}
+    """Pickup with a deliberate, sustained turn overriding the stored position."""
+    FAST_CC_PER_SECOND=24
+    OVERRIDE_SECONDS=.3
+    MAX_GAP_SECONDS=.12
+    def __init__(self,now=time.monotonic):self.states={};self.now=now
     def reset(self):self.states.clear()
     def value(self,key,raw,target,lo,hi):
+        now=self.now()
         physical=lo+(hi-lo)*raw/127
-        previous,latched,last_target=self.states.get(key,(None,False,target))
-        if abs(last_target-target)>1:previous=None;latched=False
-        if not latched:
-            latched=abs(physical-target)<=(hi-lo)*2/127 or (previous is not None and (previous-target)*(physical-target)<=0)
-        self.states[key]=(physical,latched,target)
-        if not latched:return None
+        state=self.states.get(key)
+        if state is None or abs(state['target']-target)>1:
+            state={'raw':None,'time':now,'target':target,'latched':False,'relative':False,'direction':0,'since':None}
+        previous_raw=state['raw']
+        previous=None if previous_raw is None else lo+(hi-lo)*previous_raw/127
+        delta=0 if previous_raw is None else raw-previous_raw
+        # Repeated identical CCs must not accumulate an override or move the value.
+        if previous_raw is not None and delta==0:return None
+        elapsed=now-state['time'];direction=1 if delta>0 else -1
+        fast=delta!=0 and 0<elapsed<=self.MAX_GAP_SECONDS and abs(delta)/elapsed>=self.FAST_CC_PER_SECOND
+        away=delta*(physical-target)>0
+        if fast and away:
+            if state['direction']!=direction or state['since'] is None:state['since']=state['time']
+            state['direction']=direction
+            if now-state['since']>=self.OVERRIDE_SECONDS:state['relative']=True
+        else:state['since']=None;state['direction']=0
+        if not state['latched']:
+            state['latched']=abs(physical-target)<=(hi-lo)*2/127 or (previous is not None and (previous-target)*(physical-target)<=0)
+        state.update(raw=raw,time=now,target=target);self.states[key]=state
+        if state['relative']:
+            # Once forced, follow turn direction from the sequencer's current value.
+            # Scale the available physical travel towards each end of the range.
+            if delta>0:desired=target+(hi-target)*delta/max(1,127-previous_raw)
+            else:desired=target+(target-lo)*delta/max(1,previous_raw)
+        elif state['latched']:desired=physical
+        else:return None
         limit=max(1,(hi-lo)/16)
-        result=round(target+max(-limit,min(limit,physical-target)))
-        self.states[key]=(physical,True,result)
+        result=round(max(lo,min(hi,target+max(-limit,min(limit,desired-target)))))
+        state['target']=result
         return result
 
 class Clock:
     def __init__(self,model,send):
         self.model=model;self.send=send;self.running=False;self.paused=False;self.step=-1;self.tick=0
-        self.lock=threading.RLock();self.pending=[];self.active=set();self.closed=False
+        self.lock=threading.RLock();self.pending=[];self.active=set();self.live=set();self.closed=False
         self.thread=threading.Thread(target=self.loop,daemon=True);self.thread.start()
     def release(self):
-        for c,n in self.active:self.send('note_off',channel=c,note=n,velocity=0)
+        for c,n in self.active:
+            if (c,n) not in self.live:self.send('note_off',channel=c,note=n,velocity=0)
         self.active.clear();self.pending.clear()
+    def audition_on(self,c,n,velocity):
+        with self.lock:self.live.add((c,n));self.send('note_on',channel=c,note=n,velocity=velocity)
+    def audition_off(self,c,n):
+        with self.lock:
+            if (c,n) in self.live:
+                self.live.discard((c,n))
+                if (c,n) not in self.active:self.send('note_off',channel=c,note=n,velocity=0)
+    def release_live(self):
+        with self.lock:
+            for c,n in list(self.live):self.audition_off(c,n)
     def stop(self):
         with self.lock:
             self.running=False;self.send('stop');self.release();self.step=-1;self.tick=0;self.paused=False
@@ -122,17 +159,19 @@ class Clock:
         with self.lock:self.release();self.model.playing=p
     def advance(self,now):
         while self.pending and self.pending[0][0]<=now:
-            _,c,n=heapq.heappop(self.pending);self.send('note_off',channel=c,note=n,velocity=0);self.active.discard((c,n))
+            _,c,n=heapq.heappop(self.pending)
+            if (c,n) not in self.live:self.send('note_off',channel=c,note=n,velocity=0)
+            self.active.discard((c,n))
         if not self.running or now<self.next:return
         self.send('clock')
         if self.tick%6==0:
-            self.step=(self.tick//6)%STEPS
+            self.step=(self.tick//6)%self.model.lengths[self.model.playing]
             for c,channel in enumerate(self.model.patterns[self.model.playing]):
                 for n,row in enumerate(channel):
                     cell=row[self.step]
                     if cell:
                         if (c,n) in self.active:
-                            self.send('note_off',channel=c,note=n,velocity=0)
+                            if (c,n) not in self.live:self.send('note_off',channel=c,note=n,velocity=0)
                             self.pending=[x for x in self.pending if x[1:]!=(c,n)];heapq.heapify(self.pending)
                         self.send('note_on',channel=c,note=n,velocity=cell[0]);self.active.add((c,n))
                         heapq.heappush(self.pending,(now+60/self.model.bpm/4*cell[1]/100,c,n))
@@ -142,4 +181,4 @@ class Clock:
         while not self.closed:
             with self.lock:self.advance(time.perf_counter())
             time.sleep(.001)
-    def close(self):self.stop();self.closed=True;self.thread.join()
+    def close(self):self.stop();self.release_live();self.closed=True;self.thread.join()

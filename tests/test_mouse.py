@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 from app import App, DEFAULT
 from core import Model, Pickup
+from editor import Editor
+from unittest.mock import Mock
 import mido
 
 class MouseTests(unittest.TestCase):
@@ -11,7 +13,8 @@ class MouseTests(unittest.TestCase):
         self.app.stroke=None
         self.app.config=DEFAULT
         self.app.pickup=Pickup();self.app.pad_held=set();self.app.pad_mode=10
-        self.app.canvas=SimpleNamespace(winfo_width=lambda:880,winfo_height=lambda:350)
+        self.app.editor=Editor(self.app.model);self.app.scale_factor={};self.app.audition=False;self.app.clock=Mock();self.app.undo_hold=None
+        self.app.canvas=SimpleNamespace(winfo_width=lambda:880,winfo_height=lambda:350,focus_set=lambda:None)
     def event(self,x,y):return SimpleNamespace(x=x,y=y)
     def test_fill_and_erase_locked_row_in_both_directions(self):
         a=self.app
@@ -28,7 +31,7 @@ class MouseTests(unittest.TestCase):
         a=self.app
         for cancel in (lambda:a.end_stroke(1),lambda:a.range(16),
                        lambda:a.midi(1,mido.Message('note_on',channel=0,note=90,velocity=100))):
-            a.model=Model();a.stroke=None
+            a.model=Model();a.editor=Editor(a.model);a.stroke=None
             a.click(self.event(81,349));cancel();a.drag(self.event(879,31),1)
             self.assertEqual(sum(bool(c) for r in a.model.notes for c in r),1)
     def test_header_and_second_button_do_not_start_new_row(self):
@@ -36,5 +39,5 @@ class MouseTests(unittest.TestCase):
         a.click(self.event(81,349));a.click(self.event(879,31),False)
         a.drag(self.event(879,31),3)
         self.assertEqual(sum(bool(c) for r in a.model.notes for c in r),1)
-    def test_first_knob_bank(self):
-        self.assertEqual([r[-1] for r in DEFAULT['bindings'] if r[0] in ('velocity','length','tempo')],[48,49,55])
+    def test_fader_defaults(self):
+        self.assertEqual([r[-1] for r in DEFAULT['bindings'] if r[0] in ('velocity','length','tempo')],[64,65,67])

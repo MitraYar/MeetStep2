@@ -22,7 +22,7 @@ for this fixed command prefix. Do not reuse it for other SMK commands.
 Black and arbitrary colors are generated using the same decoded structure;
 their actual LED appearance still needs hardware verification. The user confirmed
 the original red/white build works. Pad memory is shared across layouts: the app
-repaints all 32 pads when channel 10/11/13 is observed or selected in the GUI.
+repaints all 32 pads when channel 10/11 is observed or selected in the GUI.
 A hardware channel switch that sends no MIDI cannot be detected until the next event.
 
 Output is throttled to one changed pad per 20 ms. Device ACK was observed as

@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import mido
 from app import App, DEFAULT
 from core import Model, Clock, Pickup, PADS, PADS2
+from editor import Editor
 from lighting import packet, colors, default_theme, blend
 from shortcuts import key_id, migrate_bindings
 
@@ -65,6 +66,8 @@ class Routing(unittest.TestCase):
         a=App.__new__(App);self.a=a;a.model=Model();a.stroke=None;a.pickup=Pickup()
         a.config=DEFAULT;a.pad_held=set();a.pad_mode=10;a.group=0;a.encoder_attribute=None
         a.clock=Mock();a.preview_var=SimpleNamespace(get=lambda:False)
+        a.editor=Editor(a.model);a.scale_factor={};a.undo_hold=None;a.audition=False;a.knob_mode='By bank'
+        a.vars={name:Mock() for name in ('velocity','length','bpm')}
     def note(self,ch,n,on=True,zero=False):
         self.a.midi(1,mido.Message('note_on' if on else 'note_off',channel=ch-1,note=n,velocity=0 if zero else 100))
     def test_preview_and_both_copy_modifiers(self):
@@ -77,18 +80,19 @@ class Routing(unittest.TestCase):
         self.assertIsNotNone(a.model.patterns[7][0][36][0]);self.assertEqual(a.model.pattern,0)
     def test_channels_steps_and_encoder_groups(self):
         a=self.a;self.note(9,60);self.assertEqual(a.model.channel,8)
-        self.note(13,PADS2[7]);self.assertEqual((a.group,a.encoder_attribute,a.model.page),(7,'length',3))
+        a.select_group(7);self.assertEqual((a.group,a.model.page),(7,3))
         self.note(10,PADS[15]);self.assertIsNotNone(a.model.notes[60][63])
-        a.midi(1,mido.Message('control_change',channel=5,control=55,value=0))
+        a.midi(1,mido.Message('control_change',channel=5,control=63,value=0))
         self.assertEqual(a.model.notes[60][63][1],100)
-        a.midi(1,mido.Message('control_change',channel=5,control=55,value=127))
+        a.midi(1,mido.Message('control_change',channel=5,control=63,value=127))
         self.assertGreater(a.model.notes[60][63][1],100)
         self.assertEqual(a.model.bpm,120)
     def test_utility_pads(self):
-        for ch in (10,11,13):
+        for ch in (10,11):
             self.note(ch,PADS2[8]);self.a.clock.pause_toggle.assert_called()
-            self.a.model.edit(36,0,True);self.note(ch,PADS2[15]);self.assertIsNone(self.a.model.notes[36][0])
-            if ch!=13:self.note(ch,PADS2[7]);self.assertIsNotNone(self.a.model.notes[36][0])
+            self.a.model.edit(36,0,True);self.note(ch,PADS2[15]);self.note(ch,PADS2[15],False);self.assertIsNone(self.a.model.notes[36][0])
+            if ch==10:self.note(ch,PADS2[7]);self.assertIsNotNone(self.a.model.notes[36][0])
+        before=self.a.group;self.note(13,PADS2[7]);self.assertEqual(self.a.group,before)
 
 class Playback(unittest.TestCase):
     def test_all_channels_64_steps_and_view_does_not_play(self):
