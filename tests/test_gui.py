@@ -149,9 +149,10 @@ class GuiTests(unittest.TestCase):
         self.assertGreaterEqual(d.win.winfo_rooty(),0);self.assertLessEqual(d.win.winfo_rooty()+d.win.winfo_height(),d.win.winfo_screenheight())
         d.split_outputs.set(True);d.channel_outputs[1].set('Channel 2 port');d.velocity_sensitivity.set(4);d.apply()
         self.assertTrue(a.config['split_outputs']);self.assertEqual(a.config['channel_outputs'][1],'Channel 2 port');self.assertEqual(a.config['velocity_mouse_sensitivity'],4)
-        a.root.update()
-        for widget in a.mode_buttons.values():
+        a.root.geometry('1000x650');a.root.update()
+        for widget in list(a.mode_buttons.values())+a.pitch_buttons:
             self.assertLessEqual(widget.winfo_rootx()+widget.winfo_width(),a.root.winfo_rootx()+a.root.winfo_width())
+            self.assertGreaterEqual(widget.winfo_width(),widget.winfo_reqwidth())
     def test_gui_poll_survives_an_unexpected_render_failure(self):
         a=self.a;a.root.after_cancel(a.poll_id)
         with patch.object(a,'poll_once',side_effect=RuntimeError('test render failure')):a.poll()

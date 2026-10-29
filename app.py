@@ -101,17 +101,17 @@ class App:
         modes=ttk.Frame(self.root,padding=5);modes.pack(fill='x')
         self.mode_buttons={}
         for name,label in [('follow_keys','Keys · Q'),('follow_playhead','Follow · W'),('paint_velocity','Velocity · E'),('paint_gate','Gate · R'),('fill_end','Fill N · F'),('select_mode','Select Mode · Shift S'),('disable_modifiers','Disable modifiers · Ctrl `')]:
-            b=ttk.Button(modes,text=label,command=lambda a=name:self.action(a));b.pack(side='left',padx=2);self.mode_buttons[name]=b
+            b=ttk.Button(modes,text=label,style='Mode.TButton',command=lambda a=name:self.action(a));b.pack(side='left',padx=2);self.mode_buttons[name]=b
             if name=='fill_end':b._hint=Tooltip(b,'Fill N: Ctrl + 1…0 repeats the next 1…10 source steps from the cursor to the pattern end. Ctrl + D repeats the selected block. A/S chooses note, whole step, or all channels. Left copies and copies to the final N steps stay single.')
         inputsbar=ttk.Frame(self.root,padding=4);inputsbar.pack(fill='x')
         for name,label in [('drone','Drone · V'),('legato','Legato · B'),('nonlegato','Non-legato · N'),('cancel_articulation','Cancel · C'),('mono','Mono · M'),('step_input','Step · Shift K'),('sticky_input','Sticky · Shift L'),('record_input','Record · Shift R'),('hotkey_mode','Hotkey · Ctrl B')]:
-            b=ttk.Button(inputsbar,text=label,command=lambda a=name:self.action(a));b.pack(side='left',padx=2);self.mode_buttons[name]=b
+            b=ttk.Button(inputsbar,text=label,style='Mode.TButton',command=lambda a=name:self.action(a));b.pack(side='left',padx=2);self.mode_buttons[name]=b
         pitchbar=ttk.Frame(self.root,padding=4);pitchbar.pack(fill='x');ttk.Label(pitchbar,text='Pitch').pack(side='left',padx=8)
         self.pitch_buttons=[]
         for i,label in enumerate(('1 ↘ slow','2 ↘ fast','3 ↗ slow','4 ↗ fast','5 −68¢','6 +22¢','7 −22¢','8 −50¢'),1):
-            b=ttk.Button(pitchbar,text=label,command=lambda i=i:self.action(f'pitch_{i}'));b.pack(side='left',padx=2);self.pitch_buttons.append(b)
-        ttk.Button(pitchbar,text='Reset · `',command=lambda:self.action('pitch_reset')).pack(side='left',padx=4)
-        b=ttk.Button(pitchbar,text='Set pitch · Shift `',command=lambda:self.action('set_pitch'));b.pack(side='left',padx=2);self.mode_buttons['set_pitch']=b
+            b=ttk.Button(pitchbar,text=label,style='Mode.TButton',command=lambda i=i:self.action(f'pitch_{i}'));b.pack(side='left',padx=2);self.pitch_buttons.append(b)
+        ttk.Button(pitchbar,text='Reset · `',style='Mode.TButton',command=lambda:self.action('pitch_reset')).pack(side='left',padx=4)
+        b=ttk.Button(pitchbar,text='Set pitch · Shift `',style='Mode.TButton',command=lambda:self.action('set_pitch'));b.pack(side='left',padx=2);self.mode_buttons['set_pitch']=b
         mute_row=ttk.Frame(self.root);mute_row.pack(fill='x',padx=12,pady=3)
         self.mute_all_button=tk.Label(mute_row,text='MUTES',width=7,relief='raised',cursor='hand2');self.mute_all_button.pack(side='left',padx=(0,22),fill='y')
         self.mute_all_button.bind('<Button-1>',lambda e:self.action('mute_all'));self.mute_all_button.bind('<Button-3>',lambda e:self.action('unmute_all'))

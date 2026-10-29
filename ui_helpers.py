@@ -20,12 +20,14 @@ def theme(root,name):
     style=ttk.Style(root)
     if name=='Legacy light':
         style.theme_use('vista' if 'vista' in style.theme_names() else 'default')
+        style.configure('Mode.TButton',padding=(5,4))
         root.configure(bg='#d9d9d9');return
     style.theme_use('clam')
     dark=name=='Dark';bg='#18212e' if dark else '#f2f5f9';fg='#e6edf5' if dark else '#213047';field='#243247' if dark else '#ffffff'
     root.configure(bg=bg)
     style.configure('.',background=bg,foreground=fg,font=('Segoe UI',9),fieldbackground=field)
     style.configure('TButton',padding=(9,5));style.map('TButton',background=[('active','#34536b' if dark else '#d6e6f2')])
+    style.configure('Mode.TButton',padding=(5,4))
     style.configure('TNotebook.Tab',padding=(12,7));style.map('TNotebook.Tab',background=[('selected',field)])
     style.configure('Treeview',background=field,fieldbackground=field,foreground=fg,rowheight=26)
     style.map('Treeview',background=[('selected','#3b7287')],foreground=[('selected','#ffffff')])
