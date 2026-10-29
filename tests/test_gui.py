@@ -47,7 +47,8 @@ class GuiTests(unittest.TestCase):
             a.canvas.event_generate('<KeyRelease>',keycode=code,state=state);a.root.update()
         a.model.edit(36,0)
         press(0x31,10,4);self.assertIsNotNone(a.model.notes[36][1])
-        press(0x4C,46,1);self.assertIn((36,2),a.editor.selection)
+        press(0x49,31,1);self.assertIn((37,1),a.editor.selection)
+        press(0x4C,46,1);self.assertTrue(a.note_input.sticky)
         alt=0x20000 if sys.platform=='win32' else 8
         press(0x71,68,alt);press(0x36,15,alt);self.assertEqual(a.model.lengths[0],26)
         press(0x76,73,alt);press(0x38,17,alt);self.assertEqual(a.model.lengths[0],8)
@@ -82,6 +83,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(a.model.notes[36][0],(100,100))
         d.apply();self.assertTrue(app.CONFIG.exists());d.close()
         a.midi(2,mido.Message('control_change',channel=3,control=22,value=39))
+        a.midi(2,mido.Message('control_change',channel=3,control=22,value=42))
         self.assertGreater(a.model.notes[36][0][1],100);self.assertEqual(a.model.notes[36][0][0],100)
         a.options();self.assertEqual(a.settings.book.index('current'),1)
         for appearance in ('Light','Dark','Legacy light'):
@@ -89,8 +91,36 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(a.config['theme']['ui'],appearance)
     def test_bound_pc_forward_pad_releases_and_modifier_capture(self):
         from unittest.mock import Mock
-        a=self.a;a.outputs[3]=Mock();row=next(r for r in a.config['bindings'] if r[0]=='pad_14_0');row[1]='VK_54'
+        a=self.a;a.outputs[3]=Mock()
+        for r in a.config['bindings']:
+            if r[1]=='VK_54':r[1]=''
+        row=next(r for r in a.config['bindings'] if r[0]=='pad_14_0');row[1]='VK_54'
         a.canvas.focus_force();a.root.update()
         a.canvas.event_generate('<KeyPress>',keysym='t');a.root.update()
         a.canvas.event_generate('<KeyRelease>',keysym='t');a.root.update()
         self.assertEqual([c.args[0].type for c in a.outputs[3].send.call_args_list],['note_on','note_off'])
+    def test_new_physical_modes_audition_and_mutes_button(self):
+        a=self.a;a.canvas.focus_force();a.root.update()
+        def press(win,linux,state=0):
+            code=win if sys.platform=='win32' else linux
+            a.canvas.event_generate('<KeyPress>',keycode=code,state=state);a.root.update()
+            a.canvas.event_generate('<KeyRelease>',keycode=code,state=state);a.root.update()
+        press(0x53,39,1);self.assertTrue(a.select_mode)
+        press(0x4B,45,1);self.assertTrue(a.note_input.step)
+        press(0x52,27,1);self.assertTrue(a.note_input.record)
+        press(0x42,56,4);self.assertTrue(a.note_input.hotkeys)
+        press(0x35,14,0x20000 if sys.platform=='win32' else 8);self.assertEqual(a.model.channel,4)
+        press(0xBF,61);self.assertTrue(a.audition);self.assertIsNone(a.options_window)
+        a.mute_all_button.event_generate('<ButtonPress-1>');a.root.update();self.assertTrue(all(a.model.muted))
+        a.mute_all_button.event_generate('<ButtonPress-3>');a.root.update();self.assertFalse(any(a.model.muted))
+        self.assertGreater(a.mute_canvas.winfo_rootx()-a.mute_all_button.winfo_rootx()-a.mute_all_button.winfo_width(),15)
+    def test_pitch_options_apply_and_idle_render_cache(self):
+        from unittest.mock import Mock
+        a=self.a;a.options();d=a.settings;d.book.select(3)
+        d.pitch_fields['micro',0,'cents'].set('-42');d.pitch_fields['micro',0,'ms'].set('180')
+        d.pitch_fields['approach',0,'time'].set('1\\128');d.apply();d.close()
+        a.action('pitch_5');self.assertEqual(a.model.pitch_presets[0]['micro'],-42)
+        self.assertEqual(a.model.pitch_presets[0]['micro_ms'],180)
+        a.root.after_cancel(a.poll_id);a.poll();a.root.after_cancel(a.poll_id)
+        a.draw=Mock(wraps=a.draw);a.poll();a.root.after_cancel(a.poll_id);a.draw.assert_not_called()
+        a.model.edit(36,0);a.poll();a.draw.assert_called_once()

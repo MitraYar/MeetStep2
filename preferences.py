@@ -7,10 +7,12 @@ from shortcuts import action_label,pretty_key,key_id,migrate_bindings,pad_label,
 from lighting import merge_theme,rgb
 from core import PADS,PADS2
 from ui_helpers import Tooltip,tooltips
+from pitch import defaults as pitch_defaults,validate_settings as validate_pitch
 
 def normalize_settings(data):
     if not isinstance(data,dict):raise ValueError('Expected settings object')
-    result=copy.deepcopy(data);result['bindings']=migrate_bindings(data);result['version']=4
+    result=copy.deepcopy(data);result['bindings']=migrate_bindings(data);result['version']=5
+    result['pitch']=validate_pitch(result.get('pitch',pitch_defaults()))
     ports=list(result.get('ports',['']*6));ports+=['']*(6-len(ports))
     if len(ports)!=6 or any(not isinstance(p,str) for p in ports):raise ValueError('Expected 2 inputs and 4 outputs')
     result['ports']=ports;result['theme']=merge_theme(result.get('theme',{}))
@@ -44,9 +46,19 @@ class SettingsDialog:
         self.win=tk.Toplevel(app.root);app.options_window=self.win;self.win.title('MeetStep · Options')
         self.win.geometry(f'{min(1080,self.win.winfo_screenwidth()-40)}x{min(740,self.win.winfo_screenheight()-70)}');self.win.minsize(960,620)
         self.book=ttk.Notebook(self.win);self.book.pack(fill='both',expand=True,padx=10,pady=10)
-        self.midi=ttk.Frame(self.book,padding=12);self.shortcuts=ttk.Frame(self.book,padding=12);self.interface=ttk.Frame(self.book,padding=12)
-        for frame,name in ((self.midi,'MIDI'),(self.shortcuts,'Shortcuts'),(self.interface,'Interface')):self.book.add(frame,text=name)
-        self.book.select(min(app.last_options_tab,2));self.book.bind('<<NotebookTabChanged>>',lambda e:setattr(app,'last_options_tab',self.book.index('current')))
+        self.midi=ttk.Frame(self.book,padding=12);self.shortcuts=ttk.Frame(self.book,padding=12);self.interface=ttk.Frame(self.book,padding=12);self.pitch_tab=ttk.Frame(self.book,padding=16)
+        for frame,name in ((self.midi,'MIDI'),(self.shortcuts,'Shortcuts'),(self.interface,'Interface'),(self.pitch_tab,'Microtones / Approaches')):self.book.add(frame,text=name)
+        self.book.select(min(app.last_options_tab,3));self.book.bind('<<NotebookTabChanged>>',lambda e:setattr(app,'last_options_tab',self.book.index('current')))
+        self.pitch_fields={}
+        for section,keys,labels,start in [('micro',['cents','ms'],['Cents','Transition ms'],0),('approach',['start','random','time','curve'],['Start cents','Random ± cents','Time: 1/16 or ms','Curve 0–100'],7)]:
+            ttk.Label(self.pitch_tab,text='Microtones · keys 5–8' if section=='micro' else 'Approaches · keys 1–4').grid(row=start,column=0,columnspan=5,sticky='w',pady=12)
+            for col,label in enumerate(labels,1):ttk.Label(self.pitch_tab,text=label).grid(row=start+1,column=col,padx=8)
+            for i,values in enumerate(app.config['pitch'][section]):
+                ttk.Label(self.pitch_tab,text=str(i+(5 if section=='micro' else 1))).grid(row=start+2+i,column=0)
+                for col,key in enumerate(keys,1):
+                    v=tk.StringVar(value=values[key]);self.pitch_fields[section,i,key]=v
+                    ttk.Entry(self.pitch_tab,textvariable=v,width=16).grid(row=start+2+i,column=col,padx=8,pady=5)
+        ttk.Label(self.pitch_tab,text='Curve: 0 concave · 50 linear · 100 convex. Fractional times follow BPM.\nApproach timing varies ±30 ms. Changes apply to future presets; stored steps keep their sound.').grid(row=14,column=0,columnspan=5,sticky='w',pady=15)
         self.ports=[];self.controller_names=[]
         try:inputs=['']+app.mido_inputs();outputs=['']+app.mido_outputs()
         except Exception:inputs=outputs=['']
@@ -57,7 +69,7 @@ class SettingsDialog:
         for i,name in enumerate(app.config['controller_names']):
             ttk.Label(self.midi,text=f'Controller {i+1} name').grid(row=6+i,column=0,sticky='w',pady=8)
             v=tk.StringVar(value=name);self.controller_names.append(v);ttk.Entry(self.midi,textvariable=v,width=40).grid(row=6+i,column=1,sticky='w')
-        ttk.Label(self.midi,text='Bank 1 knobs: CC48–55 velocity. Bank 2: CC56–63 gate, MIDI channel 6.\nUse MIDI Learn on a knob action if your preset sends another CC/channel.\nFaders: 1 velocity / 2 gate / 4 BPM. Pitch range: ±2 semitones.').grid(row=8,column=0,columnspan=2,pady=15,sticky='w')
+        ttk.Label(self.midi,text='Bank 1 knobs: CC48–55 velocity. Bank 2: CC56–63 gate, MIDI channel 6.\nUse MIDI Learn on a knob action if your preset sends another CC/channel.\nFaders: 1 velocity / 2 gate / 3 swing / 4 BPM. Gate knobs and faders use Scale takeover.\nPitch range: ±2 semitones.').grid(row=8,column=0,columnspan=2,pady=15,sticky='w')
         columns=('action','code','key','controller','channel','type','number')
         self.tree=ttk.Treeview(self.shortcuts,columns=columns,show='headings',height=13)
         for col,title,width in zip(columns,['Action','Physical code','Key','Controller','Ch','MIDI','No.'],[280,125,110,135,35,100,40]):
@@ -179,7 +191,9 @@ class SettingsDialog:
             else:theme[key][index]=v.get()
         from lighting import blend
         theme['bank1']['11'][:8]=[blend('#000000',theme['pattern'],(1,.65,.35)[i%3]) for i in range(8)]
-        return normalize_settings({'version':4,'ports':[v.get() for v in self.ports],'controller_names':[v.get() for v in self.controller_names],'bindings':self.rows,'binding_names':self.names,'theme':theme})
+        pitch=pitch_defaults()
+        for (section,i,key),v in self.pitch_fields.items():pitch[section][i][key]=v.get() if key=='time' else float(v.get())
+        return normalize_settings({'version':5,'ports':[v.get() for v in self.ports],'controller_names':[v.get() for v in self.controller_names],'bindings':self.rows,'binding_names':self.names,'theme':theme,'pitch':pitch})
     def apply(self):
         try:self.app.apply_settings(self.collect())
         except Exception as exc:messagebox.showerror('Settings',str(exc),parent=self.win)

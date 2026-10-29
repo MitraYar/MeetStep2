@@ -2,7 +2,7 @@
 class Editor:
     def __init__(self,model):
         self.model=model;self.step=0;self.selection=set();self.anchor=None
-        self.scope='note';self.repeat_pages=False;self.scale_sessions={};self.fill_to_end=False;self.extent=None
+        self.scope='note';self.repeat_pages=False;self.scale_sessions={};self.fill_to_end=False;self.extent=None;self.articulation=None
         model.capture_context=self.snapshot;model.restore_context=self.restore
     def snapshot(self):
         m=self.model
@@ -52,7 +52,7 @@ class Editor:
                     m.set_cell(m.pattern,m.channel,n,step,value)
             else:
                 inserted=inserted or bool(on and m.notes[n][step] is None)
-                m.pitch_presets[m.channel]=dict(preset);m.edit(n,step,on)
+                m.pitch_presets[m.channel]=dict(preset);m.edit(n,step,on,self.articulation)
         if inserted:m.pitch_presets[m.channel]={'micro':0,'bend':0}
     def erase_rectangle(self,start,end):
         m=self.model;self.rectangle(start,end);m.begin()
@@ -77,7 +77,7 @@ class Editor:
             for c,n,s,value in snapshot:
                 out=target+s-start
                 if 0<=out<length:
-                    m.set_cell(m.pattern,c,n,out,value)
+                    m.write_cell(m.pattern,c,n,out,value)
                     if c==m.channel and (n,s) in source:pasted.add((n,out))
         if pasted:
             self.selection=pasted;self.step=min(s for n,s in pasted);m.select(max(n for n,s in pasted));m.page=self.step//16

@@ -40,16 +40,16 @@ class MusicalPlayback(unittest.TestCase):
         self.events.clear();self.tick(0,11);self.assertFalse(self.notes('note_on'))
         self.c.audition_on(0,42,90);self.assertEqual(self.notes('note_on'),[(0,42)])
     def test_legato_ties_even_if_timer_is_late(self):
-        self.m.edit(36,0);self.m.edit(36,1);self.m.note_modes[0][0][36]='legato'
+        self.m.edit(36,0,articulation='legato');self.m.edit(36,1,articulation='legato')
         self.tick(0,10);self.tick(1,10.14)
         self.assertEqual(self.notes('note_on'),[(0,36)]);self.assertFalse(self.notes('note_off'))
         self.assertIn((0,36),self.c.active)
     def test_legato_chords_overlap_and_nonlegato_leaves_gap(self):
-        for note in (36,40):self.m.edit(note,0);self.m.note_modes[0][0][note]='legato'
+        for note in (36,40):self.m.edit(note,0,articulation='legato')
         self.m.edit(43,1);self.tick(0,10);self.tick(1,10.125)
         self.assertEqual(set(self.notes('note_on')),{(0,36),(0,40),(0,43)});self.assertFalse(self.notes('note_off'))
         self.c.advance(10.1271);self.assertEqual(set(self.notes('note_off')),{(0,36),(0,40)})
-        self.c.stop();self.events.clear();self.m.note_modes[0][0][36]='nonlegato';self.m.note_modes[0][0][40]='nonlegato'
+        self.c.stop();self.events.clear();self.m.set_articulation(36,0,'nonlegato');self.m.set_articulation(40,0,'nonlegato')
         self.tick(0,20);deadline=20+.125-.5/32
         self.c.advance(deadline-.0001);self.assertFalse(self.notes('note_off'))
         self.c.advance(deadline+.0001);self.assertEqual(set(self.notes('note_off')),{(0,36),(0,40)})
@@ -67,7 +67,7 @@ class PitchAndEditing(unittest.TestCase):
         for bend in range(1,5):
             events=[];p=PitchEngine(lambda kind,**kw:events.append((kind,kw)),random.Random(45))
             p.start(3,{'micro':-68,'bend':bend},10,120)
-            start,duration,amount,micro=p.curves[3]
+            curve=p.curves[3];start,duration,amount,micro=[curve[k] for k in ('start','duration','amount','micro')]
             self.assertTrue(25<=abs(amount)<=35);self.assertEqual(amount>0,bend<3)
             expected=.5/(4 if bend in (1,3) else 12);self.assertLessEqual(abs(duration-expected),.03)
             self.assertIn(('control_change',{'channel':3,'control':6,'value':2}),events)
@@ -77,7 +77,7 @@ class PitchAndEditing(unittest.TestCase):
         m=Model();e=Editor(m);m.pitch_presets[0]={'micro':22,'bend':3};e.repeat_pages=True;e.edit(36,2,True)
         for s in (2,18,34,50):self.assertEqual(m.notes[36][s][2],{'micro':22,'bend':3})
         self.assertEqual(m.pitch_presets[0],{'micro':0,'bend':0})
-        m.drones[7][8][127]=True;m.note_modes[3][2][60]='nonlegato';m.muted[4]=True;m.bases[8]=15
+        m.drones[7][8][127]=True;m.patterns[3][2][60][0]=(100,100,{'mode':'nonlegato'});m.muted[4]=True;m.bases[8]=15
         restored=Model();restored.load(json.loads(json.dumps(m.dump())));self.assertEqual(restored.dump(),m.dump())
     def test_existing_cell_keeps_values_and_preserves_pending_pitch(self):
         m=Model();m.edit(36,0);m.velocity=20;m.length=230;m.pitch_presets[0]['micro']=-50

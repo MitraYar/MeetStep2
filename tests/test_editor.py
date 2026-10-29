@@ -83,7 +83,7 @@ class ControlRouting(unittest.TestCase):
     def test_paint_gate_preserves_velocity_and_does_not_add_notes(self):
         a=self.a;a.model.edit(36,0);a.model.edit(37,0);a.model.select(36)
         a.action('paint_gate');a.model.length=250;a.model.velocity=30
-        a.click(SimpleNamespace(x=81,y=349,state=0));a.drag(SimpleNamespace(x=879,y=31),1);a.end_stroke(1)
+        a.click(SimpleNamespace(x=81,y=349,state=0),False);a.drag(SimpleNamespace(x=879,y=31),3);a.end_stroke(3)
         self.assertEqual(a.model.notes[36][0],(100,250));self.assertEqual(a.model.notes[37][0],(100,100))
         self.assertEqual(sum(bool(c) for c in a.model.notes[36]),1)
         a.model.history();self.assertEqual(a.model.notes[36][0],(100,100))
@@ -92,9 +92,10 @@ class ControlRouting(unittest.TestCase):
         a.midi(1,mido.Message('control_change',channel=5,control=48,value=101))
         self.assertEqual(a.model.notes[36][0][1],100)
         a.midi(1,mido.Message('control_change',channel=5,control=56,value=39))
+        a.midi(1,mido.Message('control_change',channel=5,control=56,value=42))
         self.assertEqual(a.encoder_attribute,'length');self.assertGreater(a.model.notes[36][0][1],100)
         a.midi(1,mido.Message('control_change',channel=5,control=55,value=101));self.assertEqual(a.model.bpm,120)
-        a.midi(1,mido.Message('control_change',channel=0,control=67,value=43));self.assertGreater(a.model.bpm,120)
+        a.midi(1,mido.Message('control_change',channel=0,control=67,value=43));a.midi(1,mido.Message('control_change',channel=0,control=67,value=46));self.assertGreater(a.model.bpm,120)
     def test_shift_mouse_rectangle_does_not_paint_until_erase_release(self):
         a=self.a;a.model.edit(36,0);a.model.edit(37,1)
         a.click(SimpleNamespace(x=81,y=349,state=1),False)

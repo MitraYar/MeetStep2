@@ -36,8 +36,8 @@ def grid_color(theme,step,cell):
 
 def colors(model,theme,mode):
     if mode==10:
-        first=[blend(theme['low'],theme['high'],cell[0]/127) if cell else empty_color(theme,model.page*16+i)
-               for i,cell in enumerate(model.notes[model.selected][model.page*16:model.page*16+16])]
+        cells=[model.notes[model.step_note(s) if model.mono[model.channel] else model.selected][s] for s in range(model.page*16,model.page*16+16)]
+        first=[blend(theme['low'],theme['high'],cell[0]/127) if cell else empty_color(theme,model.page*16+i) for i,cell in enumerate(cells)]
     else:
         first=theme['bank1'][str(mode)].copy()
         if mode==12:
