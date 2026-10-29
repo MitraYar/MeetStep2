@@ -97,6 +97,7 @@ class MidiPorts:
         desired=set(self.output_names+self.route_names)-{''}
         for name,port in list(self.open_outputs.items()):
             if name not in desired or name not in available_out or port.closed or port in failed:self.close_output(name)
+        ready=[]
         for name in desired:
             if revision!=self.revision:return
             if name in self.open_outputs:continue
@@ -107,7 +108,7 @@ class MidiPorts:
                 if revision!=self.revision:candidate.close();return
                 if name in self.route_names:
                     for c in range(9):candidate.send(mido.Message('control_change',channel=c,control=123,value=0))
-                self.open_outputs[name]=candidate;self.notices.put(('output_ready',name));self.report(('out',name),f'MIDI output connected: {name}')
+                self.open_outputs[name]=candidate;ready.append(name)
             except Exception as exc:
                 if candidate:
                     try:candidate.close()
@@ -115,6 +116,8 @@ class MidiPorts:
                 self.report(('out',name),f'MIDI output {name}: {exc}')
         self.outputs[:]=[self.open_outputs.get(n) for n in self.output_names]
         self.channel_outputs[:]=[self.open_outputs.get(n) for n in self.route_names]
+        for name in ready:
+            self.notices.put(('output_ready',name));self.report(('out',name),f'MIDI output connected: {name}')
     def loop(self):
         while not self.closed:
             self.wake.clear()

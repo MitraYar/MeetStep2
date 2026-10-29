@@ -171,6 +171,16 @@ class MidiRecovery(unittest.TestCase):
     def test_open_output_exception_keeps_live_input_open(self):
         self.io.close_output('B');inp=self.io.inputs[0];self.backend.open_output.side_effect=OSError('device busy')
         self.io.service();self.assertFalse(inp.closed);self.assertIs(self.io.inputs[0],inp)
+    def test_recovery_notice_waits_until_new_routes_are_published(self):
+        while not self.io.notices.empty():self.io.notices.get_nowait()
+        self.io.configure(self.config)
+        def open_port(name):
+            # The GUI can run while the worker opens a second physical device.
+            self.assertFalse(any(kind=='output_ready' for kind,value in list(self.io.notices.queue)))
+            return FakePort(name)
+        self.backend.open_output.side_effect=open_port;self.io.service()
+        ready={value for kind,value in list(self.io.notices.queue) if kind=='output_ready'}
+        self.assertEqual(ready,{'A','B'});self.assertTrue(all(self.io.channel_outputs))
     def test_active_sensing_timeout_recovers_even_with_stuck_held_key(self):
         old=self.io.inputs[0];old.callback(mido.Message('active_sensing'));self.io.busy[0]=True;self.now[0]=2;self.io.service();self.assertTrue(old.closed)
     def test_clock_recovers_only_voices_for_reconnected_route(self):
