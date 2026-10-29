@@ -6,6 +6,7 @@ from core import Model,Pickup,Clock,PADS2
 from editor import Editor
 from lighting import colors,default_theme,grid_color,blend
 from app import App,DEFAULT
+from helpers import headless_app
 
 class Editing(unittest.TestCase):
     def setUp(self):self.m=Model();self.e=Editor(self.m)
@@ -71,10 +72,7 @@ class ForcedPickup(unittest.TestCase):
 
 class ControlRouting(unittest.TestCase):
     def setUp(self):
-        a=App.__new__(App);self.a=a;a.model=Model();a.editor=Editor(a.model);a.pickup=Pickup()
-        a.config=DEFAULT;a.pad_held=set();a.pad_mode=10;a.undo_hold=None;a.group=0;a.knob_mode='By bank'
-        a.stroke=None;a.scale_factor={};a.audition=False;a.clock=Mock();a.vars={n:Mock() for n in ('velocity','length','bpm')}
-        a.canvas=SimpleNamespace(winfo_width=lambda:880,winfo_height=lambda:350,focus_set=lambda:None)
+        self.a=headless_app()
     def note(self,ch,n,velocity=100):self.a.midi(1,mido.Message('note_on',channel=ch-1,note=n,velocity=velocity))
     def test_hold_undo_redoes_without_first_undoing(self):
         a=self.a;a.model.edit(36,0);a.model.history()
@@ -82,11 +80,13 @@ class ControlRouting(unittest.TestCase):
         self.assertIsNone(a.model.notes[36][0])
         with patch('app.time.monotonic',return_value=11.1):self.note(11,PADS2[15],0)
         self.assertIsNotNone(a.model.notes[36][0])
-    def test_side_mouse_locks_row_and_edits_gate_in_percent(self):
+    def test_paint_gate_preserves_velocity_and_does_not_add_notes(self):
         a=self.a;a.model.edit(36,0);a.model.edit(37,0);a.model.select(36)
-        a.side_begin(81,349,'length');a.side_move(81,230);a.side_end()
-        self.assertGreater(a.model.notes[36][0][1],127);self.assertEqual(a.model.notes[37][0][1],100)
-        a.model.history();self.assertEqual(a.model.notes[36][0][1],100)
+        a.action('paint_gate');a.model.length=250;a.model.velocity=30
+        a.click(SimpleNamespace(x=81,y=349,state=0));a.drag(SimpleNamespace(x=879,y=31),1);a.end_stroke(1)
+        self.assertEqual(a.model.notes[36][0],(100,250));self.assertEqual(a.model.notes[37][0],(100,100))
+        self.assertEqual(sum(bool(c) for c in a.model.notes[36]),1)
+        a.model.history();self.assertEqual(a.model.notes[36][0],(100,100))
     def test_bank_routing_and_fader_does_not_touch_other_parameters(self):
         a=self.a;a.model.edit(36,0);a.model.edit(36,7)
         a.midi(1,mido.Message('control_change',channel=5,control=48,value=101))

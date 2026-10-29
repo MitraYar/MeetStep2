@@ -3,31 +3,39 @@ from tkinter import ttk, messagebox, filedialog, colorchooser
 import mido
 from core import Model, Clock, PADS, PADS2, Pickup
 from lighting import default_theme, colors, packet, rgb, blend, grid_color
-from shortcuts import DEFAULT_BINDINGS, key_id, migrate_bindings
+from shortcuts import DEFAULT_BINDINGS, key_id, migrate_bindings,action_label
 from editor import Editor
-from mousebuttons import SideButtons
+from preferences import SettingsDialog,normalize_settings
+from ui_helpers import theme as apply_theme,tooltips,Tooltip
 ROOT=pathlib.Path(__file__).resolve().parent
 CONFIG=pathlib.Path.home()/'.meetstep.json'
-DEFAULT={'version':3,'ports':['','','','',''],'bindings':DEFAULT_BINDINGS,'theme':default_theme()}
+DEFAULT={'version':4,'ports':['']*6,'controller_names':['SMK 37 Pro','Controller 2'],'binding_names':{},'bindings':DEFAULT_BINDINGS,'theme':default_theme()}
 class App:
     def __init__(self,run=True):
-        self.root=tk.Tk();self.root.title('MeetStep • SMK 37 Pro');self.root.geometry('1120x730')
-        self.held_keys=set();self.key_releases={};self.stroke=None;self.model=Model();self.events=queue.Queue();self.inputs=[];self.outputs=[None]*3
+        self.root=tk.Tk();self.root.title('MeetStep • SMK 37 Pro')
+        self.root.geometry(f'{min(1240,self.root.winfo_screenwidth()-40)}x{min(850,self.root.winfo_screenheight()-70)}');self.root.minsize(1000,650)
+        self.held_keys=set();self.key_releases={};self.stroke=None;self.model=Model();self.events=queue.Queue();self.inputs=[];self.outputs=[None]*4
         self.pad_mode=10;self.pad_held=set();self.group=0;self.encoder_attribute=None;self.pickup=Pickup();self.options_window=None
         self.editor=Editor(self.model);self.undo_hold=None;self.audition=False
-        self.show_gate=False;self.gate_until=0;self.side_stroke=None;self.knob_mode='By bank';self.scale_factor={}
+        self.show_gate=False;self.gate_until=0;self.knob_mode='By bank';self.scale_factor={}
         self.length_tens=None
+        self.settings=None;self.last_options_tab=0;self.follow_keys=True;self.follow_playhead=False
+        self.paint_mode=None;self.drone_mode=False;self.hide_bends=False;self.hide_micro=False
+        self.step_holds={};self.forwarded=set();self.tap_times={};self.mute_stroke=None;self.last_midi='';self.last_follow_page=None
+        self.held_actions=set();self.last_tap=None;self.forward_map={};self.key_actions={}
         self.config=json.loads(json.dumps(DEFAULT));self.error='';self.led_cache={};self.led_index=0
         try:
             if CONFIG.exists():
                 saved=json.loads(CONFIG.read_text())
-                self.config.update(saved);self.config['bindings']=migrate_bindings(saved)
-                self.config['version']=3
-        except Exception: pass
+                self.config=normalize_settings(saved)
+        except Exception as exc:self.error=f'Could not load settings: {exc}'
+        apply_theme(self.root,self.config['theme']['ui'])
+        icon=ROOT/'assets'/'meetstep.ico'
+        if sys.platform=='win32' and icon.exists():self.root.iconbitmap(str(icon))
         self.clock=Clock(self.model,self.send)
         bar=ttk.Frame(self.root,padding=12);bar.pack(fill='x')
         ttk.Label(bar,text='MEETSTEP',font=('Segoe UI',20,'bold')).pack(side='left')
-        ttk.Button(bar,text='Play / Pause',command=self.clock.pause_toggle).pack(side='left',padx=10)
+        ttk.Button(bar,text='Play / Stop',command=lambda:self.action('pause')).pack(side='left',padx=10)
         ttk.Button(bar,text='Stop',command=self.clock.stop).pack(side='left')
         ttk.Button(bar,text='Options',command=self.options).pack(side='right')
         ttk.Button(bar,text='Save pattern',command=self.save).pack(side='right')
@@ -35,7 +43,7 @@ class App:
         self.vars={}
         controls=ttk.Frame(self.root,padding=10);controls.pack(fill='x')
         for name,lo,hi in [('velocity',1,127),('length',15,300),('bpm',30,300)]:
-            ttk.Label(controls,text=name).pack(side='left');v=tk.DoubleVar(value=getattr(self.model,name));self.vars[name]=v
+            ttk.Label(controls,text={'velocity':'Velocity','length':'Gate %','bpm':'BPM'}[name]).pack(side='left');v=tk.DoubleVar(value=getattr(self.model,name));self.vars[name]=v
             ttk.Scale(controls,from_=lo,to=hi,variable=v,command=lambda val,n=name:setattr(self.model,n,round(float(val)))).pack(side='left',padx=10)
         ttk.Button(controls,text='−16',command=lambda:self.range(-16)).pack(side='left')
         ttk.Button(controls,text='+16',command=lambda:self.range(16)).pack(side='left')
@@ -64,7 +72,7 @@ class App:
             ttk.Button(editbar,text=label,command=command).pack(side='left',padx=3)
         ttk.Label(editbar,text='Pad layout').pack(side='left',padx=8)
         self.mode_var=tk.IntVar(value=10)
-        mode_box=ttk.Combobox(editbar,values=[10,11],textvariable=self.mode_var,state='readonly',width=3)
+        mode_box=ttk.Combobox(editbar,values=list(range(10,17)),textvariable=self.mode_var,state='readonly',width=3)
         mode_box.pack(side='left');mode_box.bind('<<ComboboxSelected>>',lambda e:self.set_mode(self.mode_var.get()))
         toolsbar=ttk.Frame(self.root,padding=5);toolsbar.pack(fill='x')
         self.gate_var=tk.BooleanVar(value=False);self.audition_var=tk.BooleanVar(value=False);self.repeat_var=tk.BooleanVar(value=False)
@@ -78,6 +86,15 @@ class App:
         ttk.Button(toolsbar,text='Reset knobs',command=self.reset_knobs).pack(side='left')
         ttk.Button(toolsbar,text='Pin faders 1/2/4',command=self.pin_faders).pack(side='left')
         self.scope_label=ttk.Label(toolsbar,text='');self.scope_label.pack(side='left',padx=8)
+        modes=ttk.Frame(self.root,padding=5);modes.pack(fill='x')
+        self.mode_buttons={}
+        for name,label in [('follow_keys','Keys · Q'),('follow_playhead','Follow · W'),('paint_velocity','Paint Vel · E'),('paint_gate','Paint Gate · R'),('fill_end','Fill copies · F'),('drone','Drone · V'),('legato','Legato · B'),('nonlegato','Non-legato · N')]:
+            b=ttk.Button(modes,text=label,command=lambda a=name:self.action(a));b.pack(side='left',padx=2);self.mode_buttons[name]=b
+        self.mute_canvas=tk.Canvas(self.root,height=32,highlightthickness=0);self.mute_canvas.pack(fill='x',padx=12,pady=3)
+        self.mute_canvas.bind('<Button-1>',lambda e:self.mute_drag(e,True));self.mute_canvas.bind('<Button-3>',lambda e:self.mute_drag(e,False))
+        self.mute_canvas.bind('<B1-Motion>',lambda e:self.mute_drag(e,True));self.mute_canvas.bind('<B3-Motion>',lambda e:self.mute_drag(e,False))
+        self.mute_canvas.bind('<ButtonRelease-1>',lambda e:self.end_mute());self.mute_canvas.bind('<ButtonRelease-3>',lambda e:self.end_mute())
+        Tooltip(self.mute_canvas,'Instrument mutes: left drag mutes, right drag unmutes. Live audition remains audible.')
         self.canvas=tk.Canvas(self.root,bg='#101722',highlightthickness=0);self.canvas.pack(fill='both',expand=True,padx=12)
         self.canvas.bind('<Button-1>',self.click)
         self.canvas.bind('<Button-3>',lambda e:self.click(e,False))
@@ -86,15 +103,15 @@ class App:
         self.root.bind('<ButtonRelease-1>',lambda e:self.end_stroke(1))
         self.root.bind('<ButtonRelease-3>',lambda e:self.end_stroke(3))
         self.root.bind('<FocusOut>',lambda e:self.focus_out())
-        self.side_buttons=SideButtons(self.canvas,self.side_begin,self.side_move,self.side_end)
         self.status=ttk.Label(self.root,padding=10);self.status.pack(fill='x')
         self.root.bind_class('MeetStepKeys','<KeyPress>',self.key)
         self.root.bind_class('MeetStepKeys','<KeyRelease>',self.key_up)
         self.install_key_tag(self.root)
+        tooltips(self.root)
         self.root.protocol('WM_DELETE_WINDOW',self.close)
         self.connect();self.poll()
         if run:self.root.mainloop()
-    def cancel_stroke(self):self.model.commit();self.stroke=None;self.side_stroke=None
+    def cancel_stroke(self):self.model.commit();self.stroke=None
     def install_key_tag(self,widget):
         widget.bindtags(tuple(t for t in widget.bindtags() if t!='MeetStepKeys')[:1]+('MeetStepKeys',)+tuple(t for t in widget.bindtags()[1:] if t!='MeetStepKeys'))
         for child in widget.winfo_children():self.install_key_tag(child)
@@ -106,13 +123,13 @@ class App:
         if not 1<=length<=64:
             self.error='Pattern length must be 1–64';return
         self.cancel_stroke()
-        with self.clock.lock:self.model.lengths[self.model.pattern]=length
+        with self.clock.lock:self.model.set_meta('lengths',(self.model.pattern,),length)
         self.pattern_length.set(length);self.error=''
-    def choose_pattern(self,p,preview=None):
+    def choose_pattern(self,p,preview=None,immediate=False):
         self.context_change();self.model.pattern=p
-        if not (self.preview_var.get() if preview is None else preview):self.clock.switch_pattern(p)
+        if not (self.preview_var.get() if preview is None else preview):self.clock.switch_pattern(p,immediate)
     def set_mode(self,ch):
-        if ch!=self.pad_mode:self.pad_held.clear();self.undo_hold=None
+        if ch!=self.pad_mode:self.pad_held.clear();self.undo_hold=None;self.step_holds.clear()
         self.pad_mode=ch
     def select_group(self,g,attribute=None):
         self.context_change();self.group=max(0,min(7,g));self.model.page=self.group//2
@@ -127,6 +144,8 @@ class App:
     def pin_faders(self):
         self.reset_faders()
         for action,cc in (('velocity',64),('length',65),('tempo',67)):
+            for row in self.config['bindings']:
+                if row[0]!=action and row[2:]==[1,1,'control_change',cc]:row[2]=0
             rows=[r for r in self.config['bindings'] if r[0]==action]
             if rows:
                 for row in rows:row[2:]=[1,1,'control_change',cc]
@@ -139,7 +158,8 @@ class App:
         if not enabled:self.clock.release_live()
     def panic(self):
         self.clock.stop();self.clock.release_live();self.cancel_stroke()
-        self.pad_held.clear();self.undo_hold=None;self.reset_faders()
+        self.pad_held.clear();self.held_actions.clear();self.step_holds.clear();self.undo_hold=None;self.reset_faders();self.clock.pitch.reset();self.clock.manual_wheel=0
+        self.release_forwarded()
         while not self.events.empty():
             try:self.events.get_nowait()
             except queue.Empty:break
@@ -168,9 +188,10 @@ class App:
     def connect(self):
         self.clock.stop()
         self.clock.release_live()
+        self.release_forwarded()
         self.pad_held.clear();self.pickup.reset()
         for p in self.inputs+[p for p in self.outputs if p]:p.close()
-        self.inputs=[];self.outputs=[None]*3;self.led_cache={}
+        self.inputs=[];self.outputs=[None]*4;self.led_cache={};self.clock.pitch.configured.clear()
         try:
             for i,name in enumerate(self.config['ports'][:2]):
                 if name:self.inputs.append(mido.open_input(name,callback=lambda msg,source=i+1:self.events.put((source,msg))))
@@ -180,10 +201,12 @@ class App:
         except Exception as e:self.error=str(e)
     def action(self,name,value=127,extend=False):
         if name=='play':self.clock.toggle()
-        elif name=='pause':self.clock.pause_toggle()
+        elif name=='pause':self.clock.toggle()
+        elif name=='stop':self.clock.stop()
         elif name=='options':self.options()
         elif name in ('undo','redo'):
-            self.context_change();self.model.history(name=='redo')
+            self.cancel_stroke();self.pickup.reset();self.model.history(name=='redo');self.group=self.editor.step//8
+            self.clock.reconcile_mutes()
         elif name in ('left','right'):self.move_group(-1 if name=='left' else 1)
         elif name in ('group_left','group_right'):self.move_group(-1 if name=='group_left' else 1)
         elif name in ('prev_page','next_page'):self.page_move(-1 if name=='prev_page' else 1)
@@ -198,37 +221,97 @@ class App:
             self.cancel_stroke();self.reset_faders()
             if name=='scope_note':self.editor.toggle_note_scope()
             else:self.editor.toggle_channel_scope()
+        elif name in ('home','end'):
+            self.context_change();self.editor.step=0 if name=='home' else self.model.lengths[self.model.pattern]-1
+            self.model.page=self.editor.step//16;self.group=self.editor.step//8
+        elif name in ('offset_up','offset_down'):
+            self.cancel_stroke();self.model.base+=1 if name=='offset_up' else -1
+        elif name in ('follow_keys','follow_playhead','drone'):
+            attr={'drone':'drone_mode'}.get(name,name);setattr(self,attr,not getattr(self,attr))
+        elif name in ('paint_velocity','paint_gate'):
+            mode='velocity' if name=='paint_velocity' else 'length';self.paint_mode=None if self.paint_mode==mode else mode
+        elif name=='fill_end':self.editor.fill_to_end=not self.editor.fill_to_end
+        elif name=='duplicate_selection' or name.startswith(('duplicate_','duplicate_end_','duplicate_left_')):
+            count=None if name=='duplicate_selection' else int(name.split('_')[-1])
+            self.cancel_stroke();self.reset_faders();self.editor.duplicate(count,name.startswith('duplicate_end_'),name.startswith('duplicate_left_'));self.group=self.editor.step//8
+        elif name in ('legato','nonlegato'):
+            m=self.model;m.begin()
+            notes={n for n,s in self.editor.selection} or {m.selected}
+            target='gate' if m.note_modes[m.pattern][m.channel][m.selected]==name else name
+            for n in notes:m.set_meta('note_modes',(m.pattern,m.channel,n),target)
+            m.commit()
+        elif name.startswith('pitch_'):
+            if name=='pitch_reset':
+                self.model.pitch_presets=[{'micro':0,'bend':0} for _ in range(9)];self.clock.pitch.reset();return
+            number=int(name.split('_')[1]);preset=self.model.pitch_presets[self.model.channel]
+            key='bend' if number<5 else 'micro';v=number if number<5 else {5:-68,6:22,7:-22,8:-50}[number]
+            preset[key]=0 if preset[key]==v else v;self.clock.refresh_live_pitch(self.model.channel)
+        elif name in ('hide_bends','hide_micro'):setattr(self,name,not getattr(self,name))
+        elif name.startswith('mute_'):
+            c=int(name.split('_')[-1]);self.clock.mute(c,not self.model.muted[c])
+        elif name.startswith('delete_channel_'):
+            double=self.double_tap(name);self.select_channel(int(name.split('_')[-1]));self.clear('pattern' if double else 'channel')
+        elif name.startswith('pattern_'):self.choose_pattern(int(name.split('_')[-1]),False,self.double_tap(name))
+        elif name.startswith('length_tens_'):
+            i=int(name.split('_')[-1]);self.length_tens=0 if i==7 else i*10
+        elif name.startswith('pad_layout_'):self.set_mode(int(name.split('_')[-1]))
+        elif name.startswith('pad_'):
+            _,ch,i=name.split('_');self.held_actions.add(name);self.handle_pad(int(ch),int(i),True,('shortcut',name))
+        elif name.startswith('select_channel_'):self.select_channel(int(name.split('_')[-1]))
+        elif name.startswith('knob_'):
+            _,attribute,index=name.split('_');self.knob('length' if attribute=='gate' else 'velocity',int(index),value,name)
+        elif name.startswith('clear_'):self.clear(name[6:])
+        elif name in ('save','load','panic','reset_knobs','pin_faders','import_settings'):getattr(self,name)()
+        elif name=='view_only':self.preview_var.set(not self.preview_var.get())
+        elif name.startswith('force_'):
+            self.knob_var.set('Force velocity' if name=='force_velocity' else 'Force gate');self.pin_knobs()
+        elif name in ('export_settings','settings_apply','settings_close'):
+            if not self.settings:self.options()
+            getattr(self.settings,{'export_settings':'export','settings_apply':'apply','settings_close':'close'}[name])()
+        elif name=='set_length':self.set_pattern_length(max(1,min(64,round(1+value*63/127))))
         else:
             attr,lo,hi={'velocity':('velocity',1,127),'length':('length',15,300),'tempo':('bpm',30,300)}[name]
             val=self.pickup.value(('global',attr),value,getattr(self.model,attr),lo,hi)
             if val is not None:setattr(self.model,attr,val);self.vars[attr].set(val)
+    def double_tap(self,name):
+        now=time.monotonic();double=bool(self.last_tap and self.last_tap[0]==name and now-self.last_tap[1]<.4)
+        self.last_tap=None if double else (name,now);return double
+    def mute_drag(self,event,value):
+        if not 0<=event.x<self.mute_canvas.winfo_width():return
+        if self.mute_stroke is None:self.model.begin();self.mute_stroke={'visited':set(),'last':None}
+        c=min(8,int(event.x/(self.mute_canvas.winfo_width()/9)))
+        previous=c if self.mute_stroke['last'] is None else self.mute_stroke['last']
+        for channel in range(min(previous,c),max(previous,c)+1):
+            if channel not in self.mute_stroke['visited']:self.clock.mute(channel,value);self.mute_stroke['visited'].add(channel)
+        self.mute_stroke['last']=c
+    def end_mute(self):self.model.commit();self.mute_stroke=None
+    def release_forwarded(self):
+        if len(self.outputs)>3 and self.outputs[3]:
+            for c,n in self.forwarded:
+                try:self.outputs[3].send(mido.Message('note_off',channel=c,note=n,velocity=0))
+                except Exception as exc:self.error=str(exc)
+        self.forwarded.clear()
+        self.forward_map.clear()
     def key(self,e):
         key=key_id(e)
         if e.widget.winfo_class() in ('Entry','TEntry','Text','TSpinbox','Spinbox','TCombobox') and key!='CTRL+VK_BF' and not key.startswith('ALT+'):return
         code=int(key[-2:],16)
-        if key.startswith('ALT+') and 0x70<=code<=0x76:
-            self.length_tens=(code-0x6F)*10 if code<0x76 else 0
-            return 'break'
         if self.length_tens is not None and key.startswith('ALT+') and 0x30<=code<=0x39:
-            self.set_pattern_length(self.length_tens+code-0x30);self.length_tens=None
-            return 'break'
-        digit=int(key[-2:],16)-0x30 if key.startswith('CTRL+') and 0x30<=int(key[-2:],16)<=0x39 else None
-        action=next((row[0] for row in self.config['bindings'] if row[1] and row[1]==key),None)
+            self.set_pattern_length(self.length_tens+code-0x30);self.length_tens=None;return 'break'
+        action=next((r[0] for r in self.config['bindings'] if r[1] and r[1]==key),None)
         if not action and key.startswith('SHIFT+'):
-            action=next((row[0] for row in self.config['bindings'] if row[1]==key[6:] and row[0].startswith('grid_')),None)
-        if digit is not None:action='duplicate'
+            action=next((r[0] for r in self.config['bindings'] if r[1]==key[6:] and r[0].startswith('grid_')),None)
         if not action:return
         if e.keycode in self.key_releases:self.root.after_cancel(self.key_releases.pop(e.keycode))
-        if e.keycode in self.held_keys and action not in ('left','right','group_left','group_right','up_page','down_page') and not action.startswith('grid_'):return 'break'
-        self.held_keys.add(e.keycode)
-        if action=='duplicate':
-            self.cancel_stroke();self.reset_faders();self.editor.duplicate(digit or 10,'SHIFT+' in key);self.group=self.editor.step//8
-        else:self.action(action,extend=bool(e.state&1))
-        return 'break'
+        repeat=action.startswith('grid_') or action in ('left','right','group_left','group_right','up_page','down_page','offset_up','offset_down')
+        if e.keycode in self.held_keys and not repeat:return 'break'
+        self.held_keys.add(e.keycode);self.key_actions[e.keycode]=action;self.action(action,extend=bool(e.state&1));return 'break'
     def key_up(self,e):
         if key_id(e).endswith('VK_12'):self.length_tens=None
         def release():
             self.held_keys.discard(e.keycode);self.key_releases.pop(e.keycode,None)
+            action=self.key_actions.pop(e.keycode,None)
+            if action and action.startswith('pad_'):self.release_control(('shortcut',action));self.held_actions.discard(action)
         if e.keycode in self.key_releases:self.root.after_cancel(self.key_releases.pop(e.keycode))
         self.key_releases[e.keycode]=self.root.after_idle(release)
     def focus_out(self):
@@ -237,71 +320,116 @@ class App:
         focused=self.root.focus_get()
         if focused is not None and focused.winfo_toplevel()==self.root:return
         self.cancel_stroke();self.held_keys.clear()
+        self.end_mute()
+        for action in self.key_actions.values():
+            if action.startswith('pad_'):self.release_control(('shortcut',action));self.held_actions.discard(action)
+        self.key_actions.clear()
         self.length_tens=None
         for callback in self.key_releases.values():self.root.after_cancel(callback)
         self.key_releases.clear()
     def midi(self,source,msg):
-        if source==1 and msg.type in ('note_on','note_off'):
-            if msg.type=='note_off' or msg.velocity==0:
-                if msg.channel<9:self.clock.audition_off(msg.channel,msg.note)
-                if self.undo_hold and self.undo_hold['key']==(msg.channel+1,msg.note):
-                    if not self.undo_hold['fired']:self.action('redo' if time.monotonic()-self.undo_hold['start']>=1 else 'undo')
-                    self.undo_hold=None
-                self.pad_held.discard((msg.channel+1,msg.note));return
-            if msg.channel+1 in (10,11):
-                self.set_mode(msg.channel+1)
-                if (msg.channel+1,msg.note) in self.pad_held:return
-                self.pad_held.add((msg.channel+1,msg.note))
-        if msg.type=='note_on' and msg.velocity==0:return
+        if hasattr(msg,'channel'):
+            self.last_midi=f'IN {source} · Ch {msg.channel+1} · {msg.type} '+(f'CC{msg.control}={msg.value}' if msg.type=='control_change' else '')
+        if self.settings and self.settings.receive(source,msg):return
+        if msg.type=='pitchwheel':
+            if source==1 and msg.channel==0 and self.audition:self.clock.input_pitch(msg.pitch)
+            return
+        event_key=(source,getattr(msg,'channel',0),getattr(msg,'note',-1))
+        if msg.type in ('note_off','note_on') and (msg.type=='note_off' or msg.velocity==0):
+            if source==1 and msg.channel<9:self.clock.audition_off(msg.channel,msg.note)
+            self.release_control(event_key)
+            self.pad_held.discard(event_key)
+            for row in self.config['bindings']:
+                if row[2:]==[source,msg.channel+1,'note_on',msg.note]:self.held_actions.discard(row[0])
+            return
         if msg.type not in ('note_on','control_change'):return
-        if source==1 and msg.type=='control_change' and msg.channel==5 and 48<=msg.control<=63:
-            attribute='velocity' if msg.control<56 else 'length'
-            if self.knob_mode!='By bank':attribute='velocity' if self.knob_mode=='Force velocity' else 'length'
-            self.encoder_attribute=attribute
-            s=self.group*8+(msg.control-48)%8;cell=self.model.notes[self.model.selected][s]
-            if cell:
-                i=0 if attribute=='velocity' else 1;lo,hi=(1,127) if i==0 else (15,300)
-                key=('knob',msg.control,self.model.pattern,self.model.channel,self.model.selected,s,i)
-                value=self.pickup.value(key,msg.value,cell[i],lo,hi)
-                if value is not None:
-                    updated=list(cell);updated[i]=value
-                    self.editor.scale_sessions.clear();self.scale_factor.clear()
-                    self.model.set_cell(self.model.pattern,self.model.channel,self.model.selected,s,updated)
-                    if i==1:self.gate_until=time.monotonic()+1
+        if msg.type=='note_on':
+            if source==1 and 10<=msg.channel+1<=16:self.set_mode(msg.channel+1)
+            if event_key in self.pad_held:return
+            self.pad_held.add(event_key)
+        number=msg.note if msg.type=='note_on' else msg.control
+        row=next((r for r in self.config['bindings'] if r[2:]==[source,msg.channel+1,msg.type,number]),None)
+        if row:
+            action=row[0];value=msg.velocity if msg.type=='note_on' else msg.value
+            if action.startswith('pad_'):
+                if action.startswith('pad_layout_'):self.action(action,value);return
+                if msg.type=='control_change':
+                    event_key=(source,msg.channel,'cc',msg.control)
+                    if value==0:self.release_control(event_key);self.held_actions.discard(action);self.pad_held.discard(event_key);return
+                    if event_key in self.pad_held:return
+                    self.pad_held.add(event_key)
+                _,ch,i=action.split('_');self.held_actions.add(action)
+                self.handle_pad(int(ch),int(i),True,event_key,value)
+            elif action in ('velocity','length','tempo'):self.fader('bpm' if action=='tempo' else action,value)
+            elif msg.type!='control_change' or action.startswith('knob_') or value>0:self.action(action,value)
             return
         if source==1 and msg.type=='control_change' and msg.channel==0 and msg.control in (68,69,71):
-            attribute={68:'velocity',69:'length',71:'bpm'}[msg.control]
-            self.fader(attribute,msg.value);return
-        number=msg.note if msg.type=='note_on' else msg.control
-        for action,key,src,ch,kind,num in self.config['bindings']:
-            if (source,msg.channel+1,msg.type,number)==(src,ch,kind,num):
-                value=msg.velocity if msg.type=='note_on' else msg.value
-                if action in ('velocity','length','tempo'):self.fader('bpm' if action=='tempo' else action,value)
-                elif action not in ('play','pause') or msg.type=='note_on' or msg.value>0:self.action(action,value)
-                return
-        if source==1 and msg.type=='note_on':
-            ch=msg.channel+1
-            if ch in (10,11) and msg.note in PADS2:
-                i=PADS2.index(msg.note)
-                if i==8:self.action('pause')
-                elif i==15:
-                    if ch==10:self.action('undo')
-                    else:self.undo_hold={'key':(ch,msg.note),'start':time.monotonic(),'fired':False}
-                elif ch==10 and i==7:self.action('redo')
-                elif ch==10 and i in (13,14):self.move_group(-1 if i==13 else 1)
-            elif ch==10 and msg.note in PADS:
-                self.cancel_stroke();self.editor.scale_sessions.clear();self.scale_factor.clear();self.model.begin()
-                self.editor.step=self.model.page*16+PADS.index(msg.note)
-                self.editor.edit(self.model.selected,self.editor.step,self.model.notes[self.model.selected][self.editor.step] is None);self.model.commit()
-            elif ch==11 and msg.note in PADS[:8]:
-                p=PADS.index(msg.note)
-                if (11,PADS[10]) in self.pad_held:self.context_change();self.model.copy_to(p,True)
-                elif (11,PADS[9]) in self.pad_held:self.context_change();self.model.copy_to(p)
-                else:self.choose_pattern(p,(11,PADS[8]) in self.pad_held)
-            elif 0<=msg.channel<=8:
+            self.fader({68:'velocity',69:'length',71:'bpm'}[msg.control],msg.value);return
+        if source==1 and msg.type=='note_on' and msg.channel<9:
+            if self.follow_keys:
                 if self.model.channel!=msg.channel or self.model.selected!=msg.note:self.context_change()
                 self.model.channel=msg.channel;self.model.select(msg.note)
-                if self.audition:self.clock.audition_on(msg.channel,msg.note,msg.velocity)
+            if self.drone_mode:
+                m=self.model;on=not m.drones[m.pattern][msg.channel][msg.note]
+                m.set_meta('drones',(m.pattern,msg.channel,msg.note),on)
+            if self.audition and not self.drone_mode:self.clock.audition_on(msg.channel,msg.note,msg.velocity)
+    def handle_pad(self,ch,i,pressed,event_key,value=100):
+        if ch>=14:
+            if self.outputs[3]:
+                note=(PADS+PADS2)[i];self.outputs[3].send(mido.Message('note_on',channel=ch-1,note=note,velocity=value));self.forwarded.add((ch-1,note));self.forward_map[event_key]=(ch-1,note)
+            return
+        if ch==13:return
+        if ch==10 and i<16:
+            self.step_holds[event_key]={'start':time.monotonic(),'step':self.model.page*16+i,'note':self.model.selected,'pattern':self.model.pattern,'channel':self.model.channel,'selected':False}
+            return
+        if ch==12 and i<9:self.action(f'mute_{i}');return
+        if ch==11 and i<8:
+            held=self.held_actions
+            if 'pad_11_11' in held or 'pad_11_12' in held:
+                old=self.model.pattern;self.model.pattern=i
+                self.model.clear('note' if 'pad_11_12' in held else 'pattern');self.model.pattern=old
+            elif 'pad_11_10' in held:self.context_change();self.model.copy_to(i,True)
+            elif 'pad_11_9' in held:self.context_change();self.model.copy_to(i)
+            else:self.choose_pattern(i,'pad_11_8' in held)
+            return
+        if (ch==11 and i==15) or (i==31 and ch!=10):
+            self.undo_hold={'key':event_key,'start':time.monotonic(),'fired':False}
+        elif i==31 and ch==10:self.action('undo')
+        elif i==24:self.action('pause')
+        elif ch==10 and i==23:self.action('redo')
+        elif ch==10 and i in (29,30):self.move_group(-1 if i==29 else 1)
+    def release_control(self,event_key):
+        self.release_step(event_key)
+        if self.undo_hold and self.undo_hold['key']==event_key:
+            if not self.undo_hold['fired']:self.action('redo' if time.monotonic()-self.undo_hold['start']>=1 else 'undo')
+            self.undo_hold=None
+        forwarded=self.forward_map.pop(event_key,None)
+        if forwarded:
+            if self.outputs[3] and forwarded not in self.forward_map.values():
+                self.outputs[3].send(mido.Message('note_off',channel=forwarded[0],note=forwarded[1],velocity=0))
+                self.forwarded.discard(forwarded)
+    def release_step(self,event_key):
+        hold=self.step_holds.pop(event_key,None)
+        if not hold:return
+        if (hold['pattern'],hold['channel'])!=(self.model.pattern,self.model.channel):return
+        if not hold['selected'] and time.monotonic()-hold['start']<.5:
+            self.cancel_stroke();self.model.begin()
+            self.editor.step=hold['step'];self.model.select(hold['note'])
+            self.editor.edit(hold['note'],hold['step'],self.model.notes[hold['note']][hold['step']] is None)
+            self.model.commit();self.group=self.editor.step//8
+        else:
+            self.editor.selection.add((hold['note'],hold['step']));self.editor.step=min(s for n,s in self.editor.selection)
+            self.group=self.editor.step//8;self.reset_faders()
+    def knob(self,attribute,index,raw,name):
+        if self.knob_mode!='By bank':attribute='velocity' if self.knob_mode=='Force velocity' else 'length'
+        self.encoder_attribute=attribute;s=self.group*8+index;cell=self.model.notes[self.model.selected][s]
+        if cell is None:self.error=f'{attribute.title()} knob {index+1}: step {s+1} is empty';return
+        i=0 if attribute=='velocity' else 1;lo,hi=(1,127) if i==0 else (15,300)
+        value=self.pickup.value((name,self.model.pattern,self.model.channel,self.model.selected,s),raw,cell[i],lo,hi)
+        if value is None:self.error=f'{attribute.title()} step {s+1}: pickup at {cell[i]}' + ('%' if i else '');return
+        updated=list(cell);updated[i]=value;self.editor.scale_sessions.clear();self.scale_factor.clear()
+        self.model.set_cell(self.model.pattern,self.model.channel,self.model.selected,s,updated);self.error=''
+        if i:self.gate_until=time.monotonic()+1
     def fader(self,attribute,raw):
         if attribute=='bpm':self.action('tempo',raw);return
         i=0 if attribute=='velocity' else 1;lo,hi=(1,127) if i==0 else (15,300)
@@ -348,7 +476,7 @@ class App:
         self.stroke={'note':n,'base':self.model.base,'last':step,
                      'context':(self.model.pattern,self.model.channel,self.model.page),
                      'on':on,'button':1 if on else 3,'visited':{step}}
-        self.editor.edit(n,step,on)
+        self.editor.edit(n,step,on,self.paint_mode if on else None)
     def drag(self,e,button):
         stroke=self.stroke
         if not stroke or stroke['button']!=button:return
@@ -356,7 +484,7 @@ class App:
             w=self.canvas.winfo_width();h=self.canvas.winfo_height()
             n=self.model.base+15-max(0,min(15,int((e.y-30)/max(1,(h-30)/16))))
             s=self.model.page*16+max(0,min(15,int((e.x-80)/max(1,(w-80)/16))))
-            stroke['end']=(n,s);self.editor.rectangle(stroke['start'],stroke['end']);self.editor.step=s
+            stroke['end']=(n,s);self.editor.rectangle(stroke['start'],stroke['end'])
             return
         if self.model.base!=stroke['base'] or self.model.selected!=stroke['note'] or stroke['context']!=(self.model.pattern,self.model.channel,self.model.page):
             self.cancel_stroke();return
@@ -365,43 +493,26 @@ class App:
         # Clamp horizontally, ignore vertical motion, and fill skipped columns.
         step=self.model.page*16+max(0,min(15,int((e.x-80)/((w-80)/16))))
         for s in range(min(stroke['last'],step),max(stroke['last'],step)+1):
-            if s not in stroke['visited']:
-                self.editor.edit(stroke['note'],s,stroke['on'])
+            if self.paint_mode or s not in stroke['visited']:
+                self.editor.edit(stroke['note'],s,stroke['on'],self.paint_mode if stroke['on'] else None)
                 stroke['visited'].add(s)
-        stroke['last']=step
-    def side_begin(self,x,y,attribute):
-        self.cancel_stroke();w=self.canvas.winfo_width();h=self.canvas.winfo_height()
-        if not 80<=x<w or not 30<=y<h:return
-        self.canvas.focus_set()
-        self.editor.reset_selection();self.reset_faders()
-        rh=(h-30)/16;row=int((y-30)/rh);n=self.model.base+15-row
-        s=self.model.page*16+int((x-80)/((w-80)/16))
-        self.model.select(n);self.editor.step=s;self.model.begin()
-        self.side_stroke={'note':n,'attribute':attribute,'top':30+row*rh,'bottom':30+(row+1)*rh,'last':s,'base':{},'context':(self.model.pattern,self.model.channel,self.model.page)}
-        if attribute=='length':self.gate_until=time.monotonic()+1
-    def side_move(self,x,y):
-        stroke=self.side_stroke
-        if not stroke:return
-        if stroke['context']!=(self.model.pattern,self.model.channel,self.model.page):self.side_end();return
-        w=self.canvas.winfo_width();s=self.model.page*16+max(0,min(15,int((x-80)/max(1,(w-80)/16))))
-        distance=stroke['top']-y if y<stroke['top'] else stroke['bottom']-y if y>stroke['bottom'] else 0
-        i=0 if stroke['attribute']=='velocity' else 1;lo,hi=(1,127) if i==0 else (15,300)
-        delta=round(distance*(hi-lo)/200)
-        for step in range(min(s,stroke['last']),max(s,stroke['last'])+1):
-            cell=self.model.notes[stroke['note']][step]
-            if cell is None:continue
-            base=stroke['base'].setdefault(step,cell[i]);updated=list(cell);updated[i]=max(lo,min(hi,base+delta))
-            self.model.set_cell(self.model.pattern,self.model.channel,stroke['note'],step,updated)
-        stroke['last']=s
-        if i==1:self.gate_until=time.monotonic()+1
-    def side_end(self):self.model.commit();self.side_stroke=None
+        stroke['last']=step;self.editor.step=step
     def poll(self):
         for _ in range(256):
             try:source,msg=self.events.get_nowait()
             except queue.Empty:break
-            self.midi(source,msg)
+            try:self.midi(source,msg)
+            except Exception as exc:self.error=f'MIDI: {exc}'
+        for hold in self.step_holds.values():
+            if not hold['selected'] and time.monotonic()-hold['start']>=.5:
+                if (hold['pattern'],hold['channel'])==(self.model.pattern,self.model.channel):
+                    self.editor.selection.add((hold['note'],hold['step']));self.editor.step=min(s for n,s in self.editor.selection);self.group=self.editor.step//8;self.reset_faders()
+                hold['selected']=True
         if self.undo_hold and not self.undo_hold['fired'] and time.monotonic()-self.undo_hold['start']>=1:
             self.action('redo');self.undo_hold['fired']=True
+        if self.follow_playhead and self.clock.running and self.clock.step>=0:
+            page=self.clock.step//16
+            if page!=self.model.page:self.cancel_stroke();self.pickup.reset();self.model.page=page;self.group=self.clock.step//8
         self.draw();self.led();self.poll_id=self.root.after(20,self.poll)
     def led(self):
         if not self.outputs[2]:return
@@ -415,12 +526,16 @@ class App:
                 break
     def draw(self):
         c=self.canvas;c.delete('all');w=c.winfo_width();h=c.winfo_height();cw=(w-80)/16;rh=(h-30)/16
+        light=self.config['theme']['ui']=='Light';c.configure(bg='#edf1f6' if light else '#101722')
+        self.mute_canvas.configure(bg='#edf1f6' if light else '#101722')
         offset=self.model.page*16;theme=self.config['theme']
         for s in range(16):c.create_text(80+(s+.5)*cw,15,text=str(offset+s+1),fill='#68e0ce' if offset+s==self.clock.step else '#94a3b8')
         for r in range(16):
             n=self.model.base+15-r;y=30+r*rh
             label=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][n%12]+str(n//12-2)
-            c.create_text(38,y+rh/2,text=f'{label} · {n}',fill='#68e0ce' if n==self.model.selected else '#94a3b8')
+            style=self.model.note_modes[self.model.pattern][self.model.channel][n]
+            marker=' ∞' if self.model.drones[self.model.pattern][self.model.channel][n] else ' L' if style=='legato' else ' N' if style=='nonlegato' else ''
+            c.create_text(38,y+rh/2,text=f'{label} · {n}'+marker,fill=('#136955' if light else '#68e0ce') if n==self.model.selected else '#536478' if light else '#94a3b8')
             for s in range(16):
                 cell=self.model.notes[n][offset+s];x=80+s*cw
                 color=grid_color(theme,offset+s,cell)
@@ -432,124 +547,58 @@ class App:
                 if cell:
                     value=f'{cell[1]}%' if self.show_gate or time.monotonic()<self.gate_until else str(cell[0])
                     c.create_text(x+cw/2,y+rh/2,text=value,fill='#ffffff' if sum(rgb(color))<380 else '#102025')
+                    if len(cell)>2:
+                        meta=cell[2];annotation=''
+                        if meta.get('bend') and not self.hide_bends:annotation+='↘' if meta['bend'] in (1,2) else '↗'
+                        if meta.get('micro') and not self.hide_micro:annotation+=f"{meta['micro']:+}"
+                        if annotation:c.create_text(x+cw-4,y+3,text=annotation,anchor='ne',font=('Segoe UI',7),fill='#ffffff')
         self.channel_var.set(self.model.channel+1);self.mode_var.set(self.pad_mode)
         self.pattern_length.set(self.model.lengths[self.model.pattern])
-        for i,b in enumerate(self.pattern_buttons):b.config(text=f'{i+1}'+('▶' if i==self.model.playing else '')+('•' if i==self.model.pattern else ''))
+        for i,b in enumerate(self.pattern_buttons):b.config(text=f'{i+1}'+('▶' if i==self.model.playing else '')+('…' if i==self.clock.queued else '')+('•' if i==self.model.pattern else ''))
+        self.mute_canvas.delete('all');width=self.mute_canvas.winfo_width()/9
+        for i,muted in enumerate(self.model.muted):
+            self.mute_canvas.create_rectangle(i*width+2,2,(i+1)*width-2,30,fill='#bc4259' if muted else '#23394b',outline='')
+            self.mute_canvas.create_text((i+.5)*width,16,text=f'{i+1}  '+('MUTED' if muted else 'ON'),fill='white')
+        states={'follow_keys':self.follow_keys,'follow_playhead':self.follow_playhead,'paint_velocity':self.paint_mode=='velocity','paint_gate':self.paint_mode=='length','fill_end':self.editor.fill_to_end,'drone':self.drone_mode,'legato':self.model.note_modes[self.model.pattern][self.model.channel][self.model.selected]=='legato','nonlegato':self.model.note_modes[self.model.pattern][self.model.channel][self.model.selected]=='nonlegato'}
+        for name,button in self.mode_buttons.items():button.state(['pressed'] if states[name] else ['!pressed'])
         self.scope_label.config(text={'note':'A: note','step':'A: whole step','all_channels':'S: all channels'}[self.editor.scope]+f' · {len(self.editor.selection)} selected')
-        pending=f'Length: {self.length_tens//10}_ (Alt + digit)' if self.length_tens is not None else self.error
+        pending=f'Length: {self.length_tens//10}_ (Alt + digit)' if self.length_tens is not None else self.error or self.last_midi
         self.status.config(text=f'View P{self.model.pattern+1} / Play P{self.model.playing+1} · Ch {self.model.channel+1} · Note {self.model.selected} · Steps {offset+1}–{offset+16} · Group {self.group+1} {self.encoder_attribute or "knobs by bank"} | {self.model.bpm} BPM | '+pending)
     def options(self):
         self.cancel_stroke()
-        if self.options_window and self.options_window.winfo_exists():self.options_window.lift();return
-        win=tk.Toplevel(self.root);self.options_window=win;win.title('Options');win.geometry('920x650');book=ttk.Notebook(win);book.pack(fill='both',expand=True)
-        ports=ttk.Frame(book,padding=15);bind_page=ttk.Frame(book);book.add(ports,text='MIDI');book.add(bind_page,text='Shortcuts')
-        bind_canvas=tk.Canvas(bind_page,highlightthickness=0)
-        bind_scroll=ttk.Scrollbar(bind_page,orient='vertical',command=bind_canvas.yview)
-        bind_canvas.configure(yscrollcommand=bind_scroll.set);bind_scroll.pack(side='right',fill='y');bind_canvas.pack(fill='both',expand=True)
-        bind=ttk.Frame(bind_canvas,padding=15);bind_canvas.create_window((0,0),window=bind,anchor='nw')
-        bind.bind('<Configure>',lambda e:bind_canvas.configure(scrollregion=bind_canvas.bbox('all')))
-        values=[]
-        try:ins=['']+mido.get_input_names();outs=['']+mido.get_output_names()
-        except Exception as e:messagebox.showerror('MIDI',str(e));ins=outs=['']
-        for i,label in enumerate(['Controller 1 · SMK','Controller 2','Notes / Clock output','Script output (reserved)','RGB output · SMK']):
-            ttk.Label(ports,text=label).grid(row=i,column=0,sticky='w');v=tk.StringVar(value=self.config['ports'][i]);values.append(v)
-            ttk.Combobox(ports,textvariable=v,values=ins if i<2 else outs,state='readonly',width=55).grid(row=i,column=1,pady=8)
-        ttk.Label(ports,text='Tracks send on MIDI channels 1–9.\nKnobs (channel 6): bank 1 CC48–55 velocity; bank 2 CC56–63 gate.\nFaders (channel 1): CC64 velocity; CC65 gate; CC67 BPM. Bank 2 adds 4.\nChannel 13 is unused. MIDI Panic releases notes; Reset buttons re-arm pickup.').grid(row=5,column=0,columnspan=2,pady=15)
-        rows=[]
-        for j,title in enumerate(['Action','PC physical key','Controller (0=off)','Channel','MIDI type','Number']):ttk.Label(bind,text=title).grid(row=0,column=j)
-        for i,row in enumerate(self.config['bindings']):
-            vs=[]
-            for j,value in enumerate(row):
-                v=tk.StringVar(value=str(value));vs.append(v)
-                if j==0:ttk.Label(bind,text=value).grid(row=i+1,column=j)
-                else:
-                    entry=ttk.Entry(bind,textvariable=v,width=18 if j in (1,4) else 9);entry.grid(row=i+1,column=j,pady=8)
-                    if j==1:
-                        def capture(event,v=v):
-                            if event.keysym in ('Control_L','Control_R','Shift_L','Shift_R','Alt_L','Alt_R'):return 'break'
-                            v.set('' if event.keysym in ('BackSpace','Delete') else key_id(event));return 'break'
-                        entry.bind('<KeyPress>',capture)
-            rows.append(vs)
-        ttk.Label(bind,text='Click a PC key field and press the shortcut. Backspace clears it.\nPhysical keys: Shift + I/J/K/L extends selection. Ctrl + 1…0 duplicates 1…10 steps;\nCtrl + Shift + 1…0 copies to the final 1…10 steps.').grid(row=len(rows)+1,column=0,columnspan=6,pady=12)
-        interface=ttk.Frame(book,padding=12);book.add(interface,text='Interface')
-        theme=copy.deepcopy(self.config['theme'])
-        tint_row=ttk.Frame(interface);tint_row.pack(fill='x',pady=(0,10))
-        ttk.Label(tint_row,text='PC empty-grid tint').pack(side='left')
-        tint=tk.DoubleVar(value=theme.get('grid_tint',8));tint_text=tk.StringVar(value=f'{round(tint.get())}%')
-        ttk.Scale(tint_row,from_=0,to=100,variable=tint,command=lambda v:tint_text.set(f'{round(float(v))}%')).pack(side='left',fill='x',expand=True,padx=12)
-        ttk.Label(tint_row,textvariable=tint_text,width=5).pack(side='left')
-        theme_tabs=ttk.Notebook(interface);theme_tabs.pack(fill='both',expand=True)
-        theme_vars={}
-        def color_field(parent,label,color,row,column=0):
-            v=tk.StringVar(value=color)
-            ttk.Label(parent,text=label).grid(row=row,column=column,sticky='w',padx=4,pady=5)
-            entry=ttk.Entry(parent,textvariable=v,width=10);entry.grid(row=row,column=column+1)
-            button=tk.Button(parent,text='●',bg=color,width=3)
-            def choose():
-                chosen=colorchooser.askcolor(v.get(),parent=win)[1]
-                if chosen:v.set(chosen);button.config(bg=chosen)
-            button.config(command=choose);button.grid(row=row,column=column+2,padx=5)
-            return v
-        for channel in (10,11):
-            tab=ttk.Frame(theme_tabs,padding=8);theme_tabs.add(tab,text=f'Channel {channel}')
-            banks=ttk.Notebook(tab);banks.pack(fill='both',expand=True)
-            first=ttk.Frame(banks,padding=10);second=ttk.Frame(banks,padding=10)
-            banks.add(first,text='Bank 1');banks.add(second,text='Bank 2')
-            if channel==10:
-                length=tk.IntVar(value=theme['empty_length']);theme_vars['empty_length']=length
-                ttk.Label(first,text='Empty step cycle (1–7)').grid(row=0,column=0)
-                ttk.Spinbox(first,from_=1,to=7,textvariable=length,width=5).grid(row=0,column=1)
-                theme_vars['empty']=[color_field(first,f'Cycle color {i+1}',color,i+1) for i,color in enumerate(theme['empty'])]
-                theme_vars['low']=color_field(first,'Velocity 0',theme['low'],8)
-                theme_vars['high']=color_field(first,'Velocity 127',theme['high'],9)
-            elif channel==11:
-                theme_vars['pattern']=color_field(first,'Pattern color',theme['pattern'],0)
-                ttk.Label(first,text='Brightness repeats: 100% → 65% → 35%.\nTop row: patterns 1–8. Bottom row: hold 1 to view, 2 to copy channel, 3 to copy note.').grid(row=1,column=0,columnspan=3,pady=15)
-            else:
-                theme_vars['encoder_top']=color_field(first,'Top row',theme['encoder_top'],0)
-                theme_vars['encoder_bottom']=color_field(first,'Bottom row',theme['encoder_bottom'],1)
-                ttk.Label(first,text='Bank 1 top: velocity groups. Bank 2 top: length groups.\nEach group has 8 steps; arrows select groups 1–8.').grid(row=2,column=0,columnspan=3,pady=15)
-            theme_vars[f'bank2_{channel}']=[color_field(second,f'Pad {i+1}',color,i%8,0 if i<8 else 3) for i,color in enumerate(theme['bank2'][str(channel)])]
-        def apply():
-            try:
-                b=[]
-                for row in rows:
-                    a,k,s,c,t,n=[v.get() for v in row];s,c,n=int(s),int(c),int(n)
-                    if s not in (0,1,2) or not 1<=c<=16 or not 0<=n<=127 or t not in ('note_on','control_change'):raise ValueError('Invalid binding')
-                    b.append([a,k,s,c,t,n])
-                keys=[r[1] for r in b if r[1]]
-                if len(keys)!=len(set(keys)):raise ValueError('Duplicate PC shortcut')
-                names=[v.get() for v in values]
-                if len([x for x in names[2:] if x])!=len(set(x for x in names[2:] if x)):raise ValueError('Choose distinct output ports')
-                selected_theme=copy.deepcopy(theme)
-                selected_theme.update({k:theme_vars[k].get() for k in ('empty_length','low','high','pattern')})
-                selected_theme['grid_tint']=round(tint.get())
-                if not 0<=selected_theme['grid_tint']<=100:raise ValueError('Grid tint: 0–100%')
-                if not 1<=selected_theme['empty_length']<=7:raise ValueError('Empty cycle: 1–7')
-                selected_theme['empty']=[v.get() for v in theme_vars['empty']]
-                selected_theme['bank2'].update({str(c):[v.get() for v in theme_vars[f'bank2_{c}']] for c in (10,11)})
-                for color in selected_theme['empty']+[selected_theme[k] for k in ('low','high','pattern','encoder_top','encoder_bottom')]+sum(selected_theme['bank2'].values(),[]):rgb(color)
-                updated={'version':3,'ports':names,'bindings':b,'theme':selected_theme}
-                CONFIG.write_text(json.dumps(updated,indent=2));ports_changed=names!=self.config['ports'];self.config=updated
-                self.pickup.reset();self.led_cache={}
-                if ports_changed:self.connect()
-            except Exception as e:messagebox.showerror('Options',str(e),parent=win)
-        ttk.Button(win,text='Apply',command=apply).pack(side='left',padx=15,pady=10);ttk.Button(win,text='Close',command=win.destroy).pack(side='right',padx=15)
-        self.install_key_tag(win)
+        if self.options_window and self.options_window.winfo_exists():
+            self.options_window.lift();return
+        self.settings=SettingsDialog(self)
+    def mido_inputs(self):return mido.get_input_names()
+    def mido_outputs(self):return mido.get_output_names()
+    def apply_settings(self,data):
+        updated=normalize_settings(data)
+        CONFIG.write_text(json.dumps(updated,indent=2),encoding='utf-8')
+        changed=updated['ports']!=self.config['ports'];self.config=updated
+        self.pickup.reset();self.led_cache={};apply_theme(self.root,self.config['theme']['ui'])
+        if changed:self.connect()
+    def import_settings(self):
+        path=filedialog.askopenfilename(filetypes=[('MeetStep settings','*.settingsjson'),('JSON','*.json')])
+        if not path:return
+        try:
+            self.apply_settings(json.loads(pathlib.Path(path).read_text(encoding='utf-8')))
+            if self.settings:self.settings.close()
+            self.options()
+        except Exception as exc:messagebox.showerror('Settings',str(exc))
     def save(self):
-        p=filedialog.asksaveasfilename(defaultextension='.json')
+        p=filedialog.asksaveasfilename(defaultextension='.patternsjson',filetypes=[('MeetStep project','*.patternsjson')])
         if p:pathlib.Path(p).write_text(json.dumps(self.model.dump()))
     def load(self):
         self.cancel_stroke()
-        p=filedialog.askopenfilename()
+        p=filedialog.askopenfilename(filetypes=[('MeetStep project','*.patternsjson'),('Legacy project','*.json')])
         if not p:return
         try:
             data=json.loads(pathlib.Path(p).read_text())
-            self.clock.stop();self.model.load(data);self.pickup.reset();self.vars['bpm'].set(self.model.bpm)
+            self.clock.stop();self.model.load(data);self.context_change();self.vars['bpm'].set(self.model.bpm)
         except Exception as e:messagebox.showerror('Pattern','Invalid pattern: '+str(e))
     def close(self):
         self.root.after_cancel(self.poll_id)
-        self.side_buttons.close()
+        self.release_forwarded()
         self.clock.close()
         for p in self.inputs+[p for p in self.outputs if p]:p.close()
         self.root.destroy()

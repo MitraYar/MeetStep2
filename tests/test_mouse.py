@@ -5,16 +5,11 @@ from core import Model, Pickup
 from editor import Editor
 from unittest.mock import Mock
 import mido
+from helpers import headless_app
 
 class MouseTests(unittest.TestCase):
     def setUp(self):
-        self.app=App.__new__(App)
-        self.app.model=Model()
-        self.app.stroke=None
-        self.app.config=DEFAULT
-        self.app.pickup=Pickup();self.app.pad_held=set();self.app.pad_mode=10
-        self.app.editor=Editor(self.app.model);self.app.scale_factor={};self.app.audition=False;self.app.clock=Mock();self.app.undo_hold=None
-        self.app.canvas=SimpleNamespace(winfo_width=lambda:880,winfo_height=lambda:350,focus_set=lambda:None)
+        self.app=headless_app()
     def event(self,x,y):return SimpleNamespace(x=x,y=y)
     def test_fill_and_erase_locked_row_in_both_directions(self):
         a=self.app

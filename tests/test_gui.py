@@ -8,6 +8,8 @@ from unittest.mock import patch
 import tkinter as tk
 from tkinter import ttk
 import app
+import mido
+from ui_helpers import theme
 
 @unittest.skipUnless(sys.platform=='win32' or os.environ.get('DISPLAY'),'Requires a graphical session')
 class GuiTests(unittest.TestCase):
@@ -30,7 +32,7 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.a.clock.running)
         button.event_generate('<KeyRelease>',keysym='space');self.a.root.update()
         button.event_generate('<KeyPress>',keysym='space');self.a.root.update()
-        self.assertTrue(self.a.clock.paused);self.assertIsNone(self.a.options_window)
+        self.assertFalse(self.a.clock.running);self.assertEqual(self.a.clock.tick,0);self.assertIsNone(self.a.options_window)
     def test_options_interface_and_shortcut(self):
         self.a.canvas.focus_force();self.a.root.update()
         self.a.canvas.event_generate('<KeyPress>',keycode=191 if sys.platform=='win32' else 61,state=4)
@@ -59,15 +61,36 @@ class GuiTests(unittest.TestCase):
         a.root.update();self.assertGreater(len(a.editor.selection),1)
         a.set_gate(True);a.draw()
         self.assertIn('100%',[a.canvas.itemcget(i,'text') for i in a.canvas.find_all() if a.canvas.type(i)=='text'])
-    @unittest.skipUnless(sys.platform=='win32','Native Windows mouse message')
-    def test_windows_forward_button_edits_gate(self):
-        import ctypes
-        from ctypes import wintypes
-        a=self.a;a.model.edit(36,0);a.canvas.focus_force();a.root.update()
-        user=ctypes.WinDLL('user32');user.SendMessageW.argtypes=[wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM]
-        user.SendMessageW.restype=ctypes.c_ssize_t
-        y=a.canvas.winfo_height()-2;pos=lambda yy:81|((yy&65535)<<16)
-        user.SendMessageW(a.canvas.winfo_id(),0x020B,2<<16,pos(y))
-        user.SendMessageW(a.canvas.winfo_id(),0x0200,0x40,pos(y-100))
-        user.SendMessageW(a.canvas.winfo_id(),0x020C,2<<16,pos(y-100))
-        self.assertGreater(a.model.notes[36][0][1],127);self.assertIsNone(a.side_stroke)
+    def test_numpad_mute_clear_double_clear_and_undo(self):
+        a=self.a;a.canvas.focus_force();a.root.update()
+        a.model.edit(36,0);a.model.set_cell(0,1,40,0,(70,200))
+        code=0x61 if sys.platform=='win32' else 87
+        def press(state):
+            a.canvas.event_generate('<KeyPress>',keycode=code,state=state);a.root.update()
+            a.canvas.event_generate('<KeyRelease>',keycode=code,state=state);a.root.update()
+        press(0x20000 if sys.platform=='win32' else 8);self.assertTrue(a.model.muted[0])
+        press(4);self.assertIsNone(a.model.notes[36][0]);self.assertIsNotNone(a.model.patterns[0][1][40][0])
+        press(4);self.assertIsNone(a.model.patterns[0][1][40][0])
+        a.action('undo');self.assertIsNotNone(a.model.patterns[0][1][40][0])
+        a.action('undo');self.assertIsNotNone(a.model.notes[36][0])
+    def test_midi_learn_gate_knob_and_settings_round_trip(self):
+        a=self.a;a.model.edit(36,0);a.options();d=a.settings;d.book.select(1);a.root.update()
+        index=next(i for i,r in enumerate(d.rows) if r[0]=='knob_gate_0')
+        d.tree.selection_set(str(index));d.select_row();d.start_learn()
+        a.midi(2,mido.Message('control_change',channel=3,control=22,value=39))
+        self.assertIsNone(d.learn);self.assertEqual(d.rows[index][2:],[2,4,'control_change',22])
+        self.assertEqual(a.model.notes[36][0],(100,100))
+        d.apply();self.assertTrue(app.CONFIG.exists());d.close()
+        a.midi(2,mido.Message('control_change',channel=3,control=22,value=39))
+        self.assertGreater(a.model.notes[36][0][1],100);self.assertEqual(a.model.notes[36][0][0],100)
+        a.options();self.assertEqual(a.settings.book.index('current'),1)
+        for appearance in ('Light','Dark','Legacy light'):
+            a.settings.appearance.set(appearance);a.settings.apply();a.draw();a.root.update()
+            self.assertEqual(a.config['theme']['ui'],appearance)
+    def test_bound_pc_forward_pad_releases_and_modifier_capture(self):
+        from unittest.mock import Mock
+        a=self.a;a.outputs[3]=Mock();row=next(r for r in a.config['bindings'] if r[0]=='pad_14_0');row[1]='VK_54'
+        a.canvas.focus_force();a.root.update()
+        a.canvas.event_generate('<KeyPress>',keysym='t');a.root.update()
+        a.canvas.event_generate('<KeyRelease>',keysym='t');a.root.update()
+        self.assertEqual([c.args[0].type for c in a.outputs[3].send.call_args_list],['note_on','note_off'])
