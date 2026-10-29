@@ -124,3 +124,36 @@ class GuiTests(unittest.TestCase):
         a.root.after_cancel(a.poll_id);a.poll();a.root.after_cancel(a.poll_id)
         a.draw=Mock(wraps=a.draw);a.poll();a.root.after_cancel(a.poll_id);a.draw.assert_not_called()
         a.model.edit(36,0);a.poll();a.draw.assert_called_once()
+    def test_held_pitch_keys_and_physical_view_shortcuts(self):
+        a=self.a;a.canvas.focus_force();a.root.update()
+        def event(kind,win,linux,state=0):
+            a.canvas.event_generate(kind,keycode=win if sys.platform=='win32' else linux,state=state);a.root.update()
+        for win,linux in ((0x31,10),(0x38,17)):event('<KeyPress>',win,linux)
+        a.canvas.event_generate('<ButtonPress-1>',x=90,y=a.canvas.winfo_height()-3);a.canvas.event_generate('<ButtonRelease-1>');a.root.update()
+        a.editor.edit(36,1,True)
+        self.assertTrue(all(a.model.notes[36][s][2]['bend']==1 and a.model.notes[36][s][2]['micro']==-50 for s in (0,1)))
+        for win,linux in ((0x31,10),(0x38,17)):event('<KeyRelease>',win,linux)
+        a.editor.edit(36,2,True);self.assertEqual(a.model.notes[36][2],(100,100))
+        event('<KeyPress>',0x4C,46,4);event('<KeyRelease>',0x4C,46,4)
+        self.assertEqual((a.editor.view_start,a.model.page,a.group),(1,0,0))
+        event('<KeyPress>',0x27,114,4);event('<KeyRelease>',0x27,114,4)
+        self.assertEqual((a.editor.view_start,a.model.page),(16,1))
+        event('<KeyPress>',0xC0,49,1);event('<KeyRelease>',0xC0,49,1);self.assertTrue(a.pitch_controls.mode)
+        event('<KeyPress>',0xC0,49,4);event('<KeyRelease>',0xC0,49,4);self.assertFalse(a.pitch_controls.mode)
+    def test_gate_shape_options_position_and_output_settings(self):
+        a=self.a;a.model.set_cell(0,0,36,0,(90,15));a.model.set_cell(0,0,36,1,(90,100));a.draw()
+        shape=a.canvas.find_withtag('gate:36:0');self.assertEqual(len(shape),1);self.assertFalse(a.canvas.find_withtag('gate:36:1'))
+        coords=a.canvas.coords(shape[0]);width=(a.canvas.winfo_width()-80)/16-6
+        self.assertAlmostEqual((coords[2]-coords[0])/width,.15);self.assertAlmostEqual((coords[4]-coords[0])/width,.21)
+        a.options();d=a.settings;a.root.update()
+        self.assertGreaterEqual(d.win.winfo_rooty(),0);self.assertLessEqual(d.win.winfo_rooty()+d.win.winfo_height(),d.win.winfo_screenheight())
+        d.split_outputs.set(True);d.channel_outputs[1].set('Channel 2 port');d.velocity_sensitivity.set(4);d.apply()
+        self.assertTrue(a.config['split_outputs']);self.assertEqual(a.config['channel_outputs'][1],'Channel 2 port');self.assertEqual(a.config['velocity_mouse_sensitivity'],4)
+        a.root.update()
+        for widget in a.mode_buttons.values():
+            self.assertLessEqual(widget.winfo_rootx()+widget.winfo_width(),a.root.winfo_rootx()+a.root.winfo_width())
+    def test_gui_poll_survives_an_unexpected_render_failure(self):
+        a=self.a;a.root.after_cancel(a.poll_id)
+        with patch.object(a,'poll_once',side_effect=RuntimeError('test render failure')):a.poll()
+        self.assertIn('UI recovered',a.error);self.assertIn(a.poll_id,a.root.tk.call('after','info'))
+        a.root.after_cancel(a.poll_id);a.poll();self.assertIn(a.poll_id,a.root.tk.call('after','info'))

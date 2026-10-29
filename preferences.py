@@ -6,16 +6,21 @@ from tkinter import ttk,colorchooser,messagebox,filedialog
 from shortcuts import action_label,pretty_key,key_id,migrate_bindings,pad_label,action_order,DEFAULT_BINDINGS
 from lighting import merge_theme,rgb
 from core import PADS,PADS2
-from ui_helpers import Tooltip,tooltips
+from ui_helpers import Tooltip,tooltips,place_dialog
 from pitch import defaults as pitch_defaults,validate_settings as validate_pitch
 
 def normalize_settings(data):
     if not isinstance(data,dict):raise ValueError('Expected settings object')
-    result=copy.deepcopy(data);result['bindings']=migrate_bindings(data);result['version']=5
+    result=copy.deepcopy(data);result['bindings']=migrate_bindings(data);result['version']=6
     result['pitch']=validate_pitch(result.get('pitch',pitch_defaults()))
     ports=list(result.get('ports',['']*6));ports+=['']*(6-len(ports))
     if len(ports)!=6 or any(not isinstance(p,str) for p in ports):raise ValueError('Expected 2 inputs and 4 outputs')
     result['ports']=ports;result['theme']=merge_theme(result.get('theme',{}))
+    routes=result.setdefault('channel_outputs',['']*9)
+    if len(routes)!=9 or any(not isinstance(p,str) for p in routes):raise ValueError('Expected 9 channel outputs')
+    if type(result.setdefault('split_outputs',False))!=bool:raise ValueError('Invalid output routing mode')
+    sensitivity=result.setdefault('velocity_mouse_sensitivity',3)
+    if not isinstance(sensitivity,(int,float)) or not .1<=sensitivity<=10:raise ValueError('Velocity mouse sensitivity: 0.1–10')
     names=result.setdefault('controller_names',['SMK 37 Pro','Controller 2'])
     if len(names)!=2 or any(not isinstance(n,str) for n in names):raise ValueError('Controller names')
     aliases=result.setdefault('binding_names',{})
@@ -44,11 +49,12 @@ class SettingsDialog:
     def __init__(self,app):
         self.app=app;self.rows=sorted(copy.deepcopy(app.config['bindings']),key=lambda r:action_order(r[0]));self.names=dict(app.config.get('binding_names',{}));self.learn=None;self.current=None
         self.win=tk.Toplevel(app.root);app.options_window=self.win;self.win.title('MeetStep · Options')
-        self.win.geometry(f'{min(1080,self.win.winfo_screenwidth()-40)}x{min(740,self.win.winfo_screenheight()-70)}');self.win.minsize(960,620)
+        place_dialog(self.win,app.root,1080,740)
         self.book=ttk.Notebook(self.win);self.book.pack(fill='both',expand=True,padx=10,pady=10)
         self.midi=ttk.Frame(self.book,padding=12);self.shortcuts=ttk.Frame(self.book,padding=12);self.interface=ttk.Frame(self.book,padding=12);self.pitch_tab=ttk.Frame(self.book,padding=16)
         for frame,name in ((self.midi,'MIDI'),(self.shortcuts,'Shortcuts'),(self.interface,'Interface'),(self.pitch_tab,'Microtones / Approaches')):self.book.add(frame,text=name)
-        self.book.select(min(app.last_options_tab,3));self.book.bind('<<NotebookTabChanged>>',lambda e:setattr(app,'last_options_tab',self.book.index('current')))
+        self.routing=ttk.Frame(self.book,padding=16);self.book.add(self.routing,text='Channel outputs')
+        self.book.select(min(app.last_options_tab,4));self.book.bind('<<NotebookTabChanged>>',lambda e:setattr(app,'last_options_tab',self.book.index('current')))
         self.pitch_fields={}
         for section,keys,labels,start in [('micro',['cents','ms'],['Cents','Transition ms'],0),('approach',['start','random','time','curve'],['Start cents','Random ± cents','Time: 1/16 or ms','Curve 0–100'],7)]:
             ttk.Label(self.pitch_tab,text='Microtones · keys 5–8' if section=='micro' else 'Approaches · keys 1–4').grid(row=start,column=0,columnspan=5,sticky='w',pady=12)
@@ -69,7 +75,14 @@ class SettingsDialog:
         for i,name in enumerate(app.config['controller_names']):
             ttk.Label(self.midi,text=f'Controller {i+1} name').grid(row=6+i,column=0,sticky='w',pady=8)
             v=tk.StringVar(value=name);self.controller_names.append(v);ttk.Entry(self.midi,textvariable=v,width=40).grid(row=6+i,column=1,sticky='w')
-        ttk.Label(self.midi,text='Bank 1 knobs: CC48–55 velocity. Bank 2: CC56–63 gate, MIDI channel 6.\nUse MIDI Learn on a knob action if your preset sends another CC/channel.\nFaders: 1 velocity / 2 gate / 3 swing / 4 BPM. Gate knobs and faders use Scale takeover.\nPitch range: ±2 semitones.').grid(row=8,column=0,columnspan=2,pady=15,sticky='w')
+        ttk.Label(self.midi,text='Bank 1 knobs: CC48–55 velocity. Bank 2: CC56–63 gate, MIDI channel 6.\nUse MIDI Learn on a knob action if your preset sends another CC/channel.\nFaders: 1 velocity / 2 gate / 3 swing / 4 BPM. All knobs and faders use Scale.\nMissing ports reconnect automatically. Idle inputs refresh after 120 seconds.\nReconnect MIDI reopens all ports. Pitch range: ±2 semitones.').grid(row=8,column=0,columnspan=2,pady=15,sticky='w')
+        self.split_outputs=tk.BooleanVar(value=app.config.get('split_outputs',False))
+        ttk.Checkbutton(self.routing,text='Separate MIDI devices for channels 1–9',variable=self.split_outputs).grid(row=0,column=0,columnspan=2,sticky='w',pady=8)
+        ttk.Label(self.routing,text='Channel 1 and Clock / Start / Stop use the Sequence / audition output from the MIDI tab.\nChannels 2–9 can use another device. An empty choice uses the first output.\nMIDI channel numbers stay 1–9. Audition, pitch bend, drones and note-offs follow the same routing.').grid(row=1,column=0,columnspan=2,sticky='w',pady=10)
+        self.channel_outputs=[tk.StringVar(value=n) for n in app.config.get('channel_outputs',['']*9)]
+        for c in range(1,9):
+            ttk.Label(self.routing,text=f'Channel {c+1} output').grid(row=c+1,column=0,sticky='w',padx=(0,20),pady=9)
+            ttk.Combobox(self.routing,textvariable=self.channel_outputs[c],values=outputs,width=65,state='readonly').grid(row=c+1,column=1,sticky='w')
         columns=('action','code','key','controller','channel','type','number')
         self.tree=ttk.Treeview(self.shortcuts,columns=columns,show='headings',height=13)
         for col,title,width in zip(columns,['Action','Physical code','Key','Controller','Ch','MIDI','No.'],[280,125,110,135,35,100,40]):
@@ -98,6 +111,11 @@ class SettingsDialog:
         ttk.Label(top,text='PC grid tint').pack(side='left');self.tint=tk.DoubleVar(value=self.theme['grid_tint']);self.tint_label=tk.StringVar(value=f'{self.tint.get():.0f}%')
         ttk.Scale(top,from_=0,to=100,variable=self.tint,command=lambda v:self.tint_label.set(f'{float(v):.0f}%')).pack(side='left',fill='x',expand=True)
         ttk.Label(top,textvariable=self.tint_label,width=5).pack(side='left')
+        sensitivity_row=ttk.Frame(self.interface);sensitivity_row.pack(fill='x',pady=8)
+        ttk.Label(sensitivity_row,text='Velocity mouse sensitivity ×').pack(side='left')
+        self.velocity_sensitivity=tk.DoubleVar(value=app.config.get('velocity_mouse_sensitivity',3))
+        ttk.Spinbox(sensitivity_row,from_=.1,to=10,increment=.1,textvariable=self.velocity_sensitivity,width=6).pack(side='left',padx=10)
+        ttk.Label(sensitivity_row,text='3 = one third of the previous mouse travel; gate sensitivity is unchanged.').pack(side='left')
         channels=ttk.Notebook(self.interface);channels.pack(fill='both',expand=True,pady=10)
         self.cycle=tk.IntVar(value=self.theme['empty_length'])
         for ch in range(10,17):
@@ -193,7 +211,7 @@ class SettingsDialog:
         theme['bank1']['11'][:8]=[blend('#000000',theme['pattern'],(1,.65,.35)[i%3]) for i in range(8)]
         pitch=pitch_defaults()
         for (section,i,key),v in self.pitch_fields.items():pitch[section][i][key]=v.get() if key=='time' else float(v.get())
-        return normalize_settings({'version':5,'ports':[v.get() for v in self.ports],'controller_names':[v.get() for v in self.controller_names],'bindings':self.rows,'binding_names':self.names,'theme':theme,'pitch':pitch})
+        return normalize_settings({'version':6,'ports':[v.get() for v in self.ports],'split_outputs':self.split_outputs.get(),'channel_outputs':[v.get() for v in self.channel_outputs],'velocity_mouse_sensitivity':self.velocity_sensitivity.get(),'controller_names':[v.get() for v in self.controller_names],'bindings':self.rows,'binding_names':self.names,'theme':theme,'pitch':pitch})
     def apply(self):
         try:self.app.apply_settings(self.collect())
         except Exception as exc:messagebox.showerror('Settings',str(exc),parent=self.win)

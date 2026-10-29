@@ -38,3 +38,21 @@ def tooltips(widget):
             text=child.cget('text')
             if text:child._hint=Tooltip(child,text)
         tooltips(child)
+def place_dialog(window,parent,width,height):
+    """Center inside the current monitor work area, including Windows taskbar."""
+    import sys
+    left=top=0;right=window.winfo_screenwidth();bottom=window.winfo_screenheight()
+    if sys.platform=='win32':
+        import ctypes
+        from ctypes import wintypes
+        class MonitorInfo(ctypes.Structure):
+            _fields_=[('cbSize',wintypes.DWORD),('rcMonitor',wintypes.RECT),('rcWork',wintypes.RECT),('dwFlags',wintypes.DWORD)]
+        api=ctypes.windll.user32;api.MonitorFromWindow.argtypes=[wintypes.HWND,wintypes.DWORD];api.MonitorFromWindow.restype=wintypes.HANDLE
+        api.GetMonitorInfoW.argtypes=[wintypes.HANDLE,ctypes.POINTER(MonitorInfo)]
+        info=MonitorInfo();info.cbSize=ctypes.sizeof(info)
+        if api.GetMonitorInfoW(api.MonitorFromWindow(parent.winfo_id(),2),ctypes.byref(info)):
+            left,top,right,bottom=info.rcWork.left,info.rcWork.top,info.rcWork.right,info.rcWork.bottom
+    width=min(width,right-left-40);height=min(height,bottom-top-70)
+    x=max(left+10,min(right-width-10,parent.winfo_rootx()+(parent.winfo_width()-width)//2))
+    y=max(top+30,min(bottom-height-40,parent.winfo_rooty()+(parent.winfo_height()-height)//2))
+    window.geometry(f'{width}x{height}{x:+d}{y:+d}');window.minsize(min(960,width),min(620,height))

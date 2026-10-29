@@ -88,11 +88,12 @@ class InputModes(unittest.TestCase):
         a.action('insert_selection');self.assertEqual(a.model.notes[36][0],(20,200))
         self.assertIsNotNone(a.model.notes[36][1]);self.assertIsNotNone(a.model.notes[37][1]);self.assertIsNone(a.model.notes[37][0])
         self.assertIsNone(a.model.patterns[0][1][36][1]);self.assertIsNone(a.model.notes[38][1])
-    def test_step_input_chord_window_sticky_and_manual_advance(self):
+    def test_step_input_held_chord_manual_advance_and_sticky(self):
         a=self.a;a.action('step_input');self.note(36,at=10);self.note(40,at=10.2)
-        a.note_input.poll(10.29);self.assertEqual(a.editor.step,0)
-        a.note_input.poll(10.31);self.assertEqual(a.editor.step,1)
+        a.note_input.poll(130);self.assertEqual(a.editor.step,0)
         self.assertIsNotNone(a.model.notes[36][0]);self.assertIsNotNone(a.model.notes[40][0])
+        a.action('grid_right');self.assertEqual(a.editor.step,1)
+        self.assertIsNotNone(a.model.notes[36][1]);self.assertIsNotNone(a.model.notes[40][1])
         a.action('sticky_input');self.note(43,at=11);self.note(47,at=12);a.note_input.poll(20)
         self.assertEqual(a.editor.step,1);self.assertIsNotNone(a.model.notes[47][1])
         a.action('grid_right');self.assertEqual(a.editor.step,2)

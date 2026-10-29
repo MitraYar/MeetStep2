@@ -73,24 +73,33 @@ class Model:
             for other,row in enumerate(self.patterns[p][c]):
                 if other!=n and row[s]:self.set_cell(p,c,other,s,None)
         self.set_cell(p,c,n,s,value)
-    def edit(self,n,s,on=None,articulation=None):
+    def edit(self,n,s,on=None,articulation=None,preset=None,consume=True):
         self.select(n)
         if on is None:on=self.notes[n][s] is None
         if on and self.notes[n][s] is not None:
             if articulation is not None:self.set_articulation(n,s,articulation)
             return
         value=(self.velocity,self.length)
-        preset=self.pitch_presets[self.channel]
+        preset=self.pitch_presets[self.channel] if preset is None else preset
         meta=dict(preset) if any(preset.values()) else {}
         if articulation and articulation!='gate':meta['mode']=articulation
         if meta:value+=(meta,)
         self.write_cell(self.pattern,self.channel,n,s,value if on else None)
-        if on:self.pitch_presets[self.channel]={'micro':0,'bend':0}
+        if on and consume:self.pitch_presets[self.channel]={'micro':0,'bend':0}
     def set_articulation(self,n,s,mode):
         cell=self.notes[n][s]
         if not cell:return
         meta=dict(cell[2]) if len(cell)>2 else {};meta['mode']=mode
         self.set_cell(self.pattern,self.channel,n,s,cell[:2]+(meta,))
+    def set_pitch(self,n,s,preset,component=None):
+        cell=self.notes[n][s]
+        if not cell:return
+        meta=dict(cell[2]) if len(cell)>2 else {}
+        keys={'approach':('bend','approach'),'micro':('micro','micro_ms','micro_key')}
+        for key in (keys[component] if component else keys['approach']+keys['micro']):
+            meta.pop(key,None)
+            if key in preset:meta[key]=copy.deepcopy(preset[key])
+        self.set_cell(self.pattern,self.channel,n,s,cell[:2]+(meta,) if meta else cell[:2])
     def toggle_mono(self):
         c=self.channel;enabled=not self.mono[c];self.begin();self.set_meta('mono',(c,),enabled)
         if enabled:
@@ -179,15 +188,22 @@ class Model:
         self.touch(True)
 
 class ScaleTakeover:
-    """Map remaining physical travel proportionally to the remaining value range."""
+    """Piecewise linear scaling, retaining fractions and a safe endpoint reserve."""
     def __init__(self):self.states={}
     def reset(self):self.states.clear()
     def value(self,key,raw,target,lo,hi):
-        old=self.states.get(key);self.states[key]=(raw,target)
-        if old is None or abs(old[1]-target)>1 or raw==old[0]:return None
-        delta=raw-old[0]
-        value=target+(hi-target)*delta/max(1,127-old[0]) if delta>0 else target+(target-lo)*delta/max(1,old[0])
-        value=round(max(lo,min(hi,value)));self.states[key]=(raw,value);return value
+        state=self.states.get(key)
+        if state is None or state['value']!=target:
+            self.states[key]={'raw':raw,'value':target,'float':float(target),'direction':0};return None
+        delta=raw-state['raw']
+        if not delta:return None
+        direction=1 if delta>0 else -1
+        if direction!=state['direction']:
+            distance=127-state['raw'] if direction>0 else state['raw']
+            state.update(direction=direction,anchor=state['raw'],base=state['float'],span=10 if distance<3 else distance)
+        travel=abs(raw-state['anchor'])/state['span'];end=hi if direction>0 else lo
+        value=max(lo,min(hi,state['base']+(end-state['base'])*travel))
+        state.update(raw=raw,float=value,value=round(value));return round(value)
 
 class Pickup:
     """Pickup with a deliberate, sustained turn overriding the stored position."""
@@ -260,6 +276,18 @@ class Clock:
     def refresh_live_pitch(self,c):
         with self.lock:
             if any(channel==c for channel,n in self.live):self.pitch.start(c,self.model.pitch_presets[c],time.perf_counter(),self.model.bpm)
+    def recover_output(self,channels,transport=False):
+        """Restore currently owned voices and clock position after a port reopens."""
+        with self.lock:
+            voices={(c,n) for c,n in self.active|self.live|self.drone_active if c in channels}
+            for c in channels:
+                self.pitch.configured.discard(c)
+                if any(ch==c for ch,n in voices):self.pitch.configure(c);self.pitch.last.pop(c,None)
+            self.pitch.update(time.perf_counter())
+            if transport and self.running:self.send('songpos',pos=max(0,self.step));self.send('continue')
+            for c,n in voices:
+                cell=self.model.patterns[self.model.playing][c][n][max(0,self.step)]
+                self.send('note_on',channel=c,note=n,velocity=cell[0] if cell else self.model.velocity)
     def sync_drones(self):
         key=(self.running,self.model.playing,self.model.drone_revision)
         if key==self.drone_key:return

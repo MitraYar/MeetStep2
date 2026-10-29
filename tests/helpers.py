@@ -7,9 +7,11 @@ from core import Model,Pickup,Clock,ScaleTakeover
 from editor import Editor
 from note_input import NoteInput
 from gestures import GridGestures
+from pitch_controls import PitchControls
 
 def headless_app():
     a=App.__new__(App);a.model=Model();a.editor=Editor(a.model);a.config=copy.deepcopy(DEFAULT)
+    a.pitch_controls=PitchControls(a);a.editor.pitch=a.pitch_controls
     a.scaler=ScaleTakeover();a.select_mode=False;a.note_input=NoteInput(a);a.gestures=GridGestures(a);a.fader_raw={}
     a.stroke=None;a.pickup=Pickup();a.pad_held=set();a.held_actions=set();a.step_holds={};a.undo_hold=None
     a.pad_mode=10;a.group=0;a.encoder_attribute=None;a.knob_mode='By bank';a.scale_factor={}

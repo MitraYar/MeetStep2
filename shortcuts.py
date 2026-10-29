@@ -26,6 +26,9 @@ DEFAULT_BINDINGS += [[action,key,0,1,'note_on',0] for action,key in [
     ('select_mode','SHIFT+VK_53'),('delete_selection','VK_2E'),('delete_selection_back','VK_08'),
     ('cancel_articulation','VK_43'),('mono','VK_4D'),('insert_selection','VK_54'),
     ('step_input','SHIFT+VK_4B'),('sticky_input','SHIFT+VK_4C'),('record_input','SHIFT+VK_52'),('hotkey_mode','CTRL+VK_42')]]
+DEFAULT_BINDINGS += [[action,key,0,1,'note_on',0] for action,key in [
+    ('page_left','CTRL+VK_25'),('page_right','CTRL+VK_27'),('view_left','CTRL+VK_4A'),('view_right','CTRL+VK_4C'),
+    ('set_pitch','SHIFT+VK_C0'),('disable_modifiers','CTRL+VK_C0')]]
 DEFAULT_BINDINGS.append(['swing','',1,1,'control_change',66])
 for c in range(9):DEFAULT_BINDINGS.append([f'channel_hotkey_{c}',f'ALT+VK_{0x31+c:02X}',0,1,'note_on',0])
 for p in range(8):
@@ -107,7 +110,7 @@ def migrate_bindings(config):
         if action=='pause' and key=='space':continue
         if action in ('velocity','length','tempo') and source==1 and ch==6 and kind=='control_change' and num in (48,49,55):continue
         if config.get('version',0)<2:key=legacy.get(key, f'VK_{ord(key.upper()):02X}' if len(key)==1 and key.isascii() else '')
-        if config.get('version',0)<5 and key:
+        if config.get('version',0)<6 and key:
             for existing in result:
                 if existing[0]!=action and existing[1]==key:existing[1]=''
         updated=[action,key,source,ch,kind,num]

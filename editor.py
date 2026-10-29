@@ -3,15 +3,20 @@ class Editor:
     def __init__(self,model):
         self.model=model;self.step=0;self.selection=set();self.anchor=None
         self.scope='note';self.repeat_pages=False;self.scale_sessions={};self.fill_to_end=False;self.extent=None;self.articulation=None
+        self.view_offset=0;self.pitch=None
         model.capture_context=self.snapshot;model.restore_context=self.restore
     def snapshot(self):
         m=self.model
-        return {'pattern':m.pattern,'channel':m.channel,'selected':m.selected,'base':m.base,'page':m.page,'step':self.step,'selection':list(self.selection),'anchor':self.anchor,'extent':self.extent,'scope':self.scope}
+        return {'pattern':m.pattern,'channel':m.channel,'selected':m.selected,'base':m.base,'page':m.page,'step':self.step,'selection':list(self.selection),'anchor':self.anchor,'extent':self.extent,'scope':self.scope,'view_offset':self.view_offset}
     def restore(self,context):
         m=self.model
         for name in ('pattern','channel','selected','base','page'):setattr(m,name,context[name])
         self.step=context.get('step',0);self.selection=set(map(tuple,context.get('selection',[])))
         self.anchor=context.get('anchor');self.extent=context.get('extent');self.scope=context.get('scope','note');self.scale_sessions.clear()
+        self.view_offset=context.get('view_offset',0)
+    @property
+    def view_start(self):return max(0,min(48,self.model.page*16+self.view_offset))
+    def shift_view(self,delta):self.view_offset=max(0,min(48,self.view_start+delta))-self.model.page*16
     def reset_selection(self):
         self.selection.clear();self.anchor=None;self.extent=None;self.scale_sessions.clear()
     def rectangle(self,start,end):
@@ -26,10 +31,10 @@ class Editor:
         else:self.reset_selection()
         self.step=max(0,min(63,start[1]+dx))
         self.model.select(max(0,min(127,start[0]+dy)))
-        self.model.page=self.step//16
+        if not self.view_start<=self.step<self.view_start+16:self.model.page=self.step//16;self.view_offset=0
         if extend:self.rectangle(self.anchor,(self.model.selected,self.step))
     def page(self,delta):
-        self.reset_selection();self.model.page=(self.model.page+delta)%4
+        self.reset_selection();self.view_offset=0;self.model.page=(self.model.page+delta)%4
         self.step=self.model.page*16+self.step%16
     def toggle_note_scope(self):
         self.scope='step' if self.scope=='note' else 'note';self.scale_sessions.clear()
@@ -41,9 +46,12 @@ class Editor:
         steps={s for n,s in cells}
         channels=range(9) if self.scope=='all_channels' else [self.model.channel]
         return {(c,n,s) for c in channels for n in range(128) for s in steps}
+    def selected_targets(self):
+        """Explicit selection is exact; A/S only controls duplication scope."""
+        return {(self.model.channel,n,s) for n,s in self.selection}
     def edit(self,n,s,on,paint=None):
         m=self.model
-        preset=dict(m.pitch_presets[m.channel]);inserted=False
+        preset=self.pitch.preset(m.channel) if self.pitch else dict(m.pitch_presets[m.channel]);inserted=False
         for step in ([s%16+16*p for p in range(4)] if self.repeat_pages else [s]):
             if paint:
                 cell=m.notes[n][step]
@@ -51,9 +59,14 @@ class Editor:
                     value=list(cell);value[0 if paint=='velocity' else 1]=m.velocity if paint=='velocity' else m.length
                     m.set_cell(m.pattern,m.channel,n,step,value)
             else:
+                if on and self.pitch and (self.pitch.mode or self.pitch.reset_held):
+                    self.pitch.paint(n,step,self.pitch.reset_held);continue
                 inserted=inserted or bool(on and m.notes[n][step] is None)
-                m.pitch_presets[m.channel]=dict(preset);m.edit(n,step,on,self.articulation)
-        if inserted:m.pitch_presets[m.channel]={'micro':0,'bend':0}
+                m.edit(n,step,on,self.articulation,preset,False)
+                if on and self.pitch and self.pitch.held:self.pitch.paint(n,step)
+        if inserted:
+            if self.pitch:self.pitch.consume(m.channel)
+            else:m.pitch_presets[m.channel]={'micro':0,'bend':0}
     def erase_rectangle(self,start,end):
         m=self.model;self.rectangle(start,end);m.begin()
         for n,s in self.selection:self.edit(n,s,False)
@@ -85,10 +98,10 @@ class Editor:
     def scale(self,attribute,factor):
         """Scale a fixed selection snapshot, never compound repeated CC values."""
         m=self.model;index=0 if attribute=='velocity' else 1;lo,hi=(1,127) if index==0 else (15,300)
-        key=(m.pattern,self.scope,tuple(sorted(self.targets())))
+        key=(m.pattern,m.channel,frozenset(self.selection))
         session=self.scale_sessions.get(attribute)
         if session is None or session['key']!=key:
-            original={(c,n,s):m.patterns[m.pattern][c][n][s][index] for c,n,s in self.targets() if m.patterns[m.pattern][c][n][s] is not None}
+            original={(c,n,s):m.patterns[m.pattern][c][n][s][index] for c,n,s in self.selected_targets() if m.patterns[m.pattern][c][n][s] is not None}
             session={'key':key,'original':original};self.scale_sessions[attribute]=session
         m.begin()
         for (c,n,s),base in session['original'].items():
